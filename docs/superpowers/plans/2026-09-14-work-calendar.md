@@ -3675,3 +3675,66 @@ Task 8의 Step 1~8을 그대로 수행하되(버튼 이름은 `+ 추가`, 폼 �
 ### Task 14: GitHub 저장소 + Pages 배포 + 실제 주소 검증
 
 Task 9의 Step 1~7을 그대로 수행한다. README의 사용 설명에 "작업 요청과 일정, 본문, 첨부(파일 700KB·링크·유튜브 재생·HTML 열기)" 한 줄을 넣는다. 실제 주소 검증(Step 6)에 유튜브 재생과 HTML 뷰어 1회씩을 포함한다.
+
+### Task 15: 등록·수정 폼에서 바로 첨부 (사용자 요청 2026-09-14)
+
+**Files:**
+- Modify: `src/ui/modals.js` (`openTaskForm`에 첨부 대기 목록), `src/main.js` (저장 후 대기 첨부 업로드), `styles.css`, `docs/superpowers/specs/2026-09-14-work-calendar-design.md`(10-3 한 줄)
+- Test: `node --check` + `npm test`; 화면 확인은 controller가 브라우저로.
+
+**Interfaces:**
+- `openTaskForm({ task, date, identity, companies, existingCount = 0, onSubmit })` — `onSubmit(value, pending)`; `pending`은 `{ kind: 'file', prepared: {name,type,size,storedSize,encoding,data} } | { kind: 'link', name, url }` 배열. 폼은 파일 선택 즉시 `prepareFile`로 압축·검사해 대기 목록에 넣고(실패 시 토스트), 링크는 `validateLink`로 검사한다. `existingCount + pending.length`가 `LIMITS.attachmentsPerTask`를 넘지 않게 막는다.
+- `main.js`: `add-task`는 `addTask` 뒤 `uploadPending(taskId, pending, identity)`(파일→`addFileAttachment`, 링크→`addLinkAttachment` 순차), `edit`는 `updateTask` 뒤 같은 함수. 일부 실패 시 `'첨부 N개 중 M개를 저장하지 못했습니다.'` 토스트 후에도 폼은 닫는다. 실시간 창 밖 문서면 `refreshArchived`.
+- 상세 시트의 첨부 관리(추가·삭제)는 그대로 유지.
+
+- [ ] Step 1: `modals.js` 폼 마크업에 `.form-atts` 블록(파일 추가·링크 추가 버튼, 숨김 `input[type=file][multiple]`, 링크 입력 행, 대기 목록 `ul.form-att-list`, 각 행에 제거 버튼) 추가. 제출 중 버튼 텍스트 `저장 중…`.
+- [ ] Step 2: `main.js`에 `uploadPending` 추가, `add-task`/`edit`의 `onSubmit(v, pending)` 연결, `edit`에 `existingCount: task.attachmentCount` 전달.
+- [ ] Step 3: `styles.css` `.form-atts`, `.form-att-list`, `.form-att-row` 스타일(작은 inset 행, 모바일 2단).
+- [ ] Step 4: 스펙 10-3에 "첨부는 등록·수정 폼에서 바로 붙일 수 있고, 상세 시트에서도 추가·삭제할 수 있다" 추가.
+- [ ] Step 5: `npm test` → 커밋 `feat: 등록·수정 폼에서 바로 파일·링크 첨부` → push.
+
+### Task 16: 항목별 댓글 (사용자 요청 2026-09-14, 협업 핵심 기능)
+
+**Files:**
+- Modify: `src/validate.js`(`LIMITS.comment = 2000`, `validateComment(text) → {ok, error, value}`), `src/store.js`(댓글 API + `deleteTask` 캐스케이드에 댓글 포함 + `normalize`에 `commentCount`), `firestore.rules`(task 필드 `commentCount`, `comments` 하위 컬렉션), `src/ui/sheet.js`(댓글 섹션), `src/ui/panel.js`·`src/ui/list.js`(💬N 표시), `src/main.js`(핸들러), `styles.css`, `test/validate.test.mjs`, `test/rules.test.mjs`, 스펙 10장에 10-4 추가.
+
+**데이터**
+```
+rooms/{key}/tasks/{taskId}/comments/{commentId}
+  text: string 1..2000
+  authorName: string 1..40
+  authorCompany: string 1..40
+  createdAt: timestamp == request.time
+tasks/{taskId}.commentCount: int 0..10000  (taskFields()에 추가; 생성 시 0)
+```
+규칙: `comments/{commentId}` — read/create/delete는 validKey, update 금지. create 검사: `hasOnly/hasAll(['text','authorName','authorCompany','createdAt'])`, `nonEmpty(text, 2000)`, `nonEmpty(authorName, 40)`, `nonEmpty(authorCompany, 40)`, `createdAt == request.time`. `validTask`에 `d.commentCount is int && d.commentCount >= 0 && d.commentCount <= 10000` 추가.
+
+**스토어**
+```js
+const commentsRef = (key, taskId) => collection(db, 'rooms', key, 'tasks', taskId, 'comments');
+export function subscribeComments(key, taskId, onChange, onError) {
+  const q = query(commentsRef(key, taskId), orderBy('createdAt'));
+  return onSnapshot(q, (qs) => onChange(qs.docs.map((s) => { const d = s.data({ serverTimestamps: 'estimate' }); return { id: s.id, text: d.text, authorName: d.authorName, authorCompany: d.authorCompany, createdAtMs: d.createdAt ? d.createdAt.toMillis() : null }; })), onError);
+}
+export async function addComment(key, taskId, text, identity) {
+  const batch = writeBatch(db);
+  batch.set(doc(commentsRef(key, taskId)), { text, authorName: identity.name, authorCompany: identity.company, createdAt: serverTimestamp() });
+  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(1), updatedAt: serverTimestamp(), updatedBy: identity.name });
+  await batch.commit();
+}
+export async function deleteComment(key, taskId, commentId, identity) {
+  const batch = writeBatch(db);
+  batch.delete(doc(commentsRef(key, taskId), commentId));
+  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(-1), updatedAt: serverTimestamp(), updatedBy: identity.name });
+  await batch.commit();
+}
+```
+`addTask`는 `commentCount: 0`을 쓴다. `deleteTask`는 `comments` 문서도 배치에 넣는다(첨부 ≤10 + 내용 ≤10 + 댓글 최대 수백 → 배치 500 한도 안에서 나눠 커밋: 400개씩 chunk).
+
+**UI (sheet.js)** 첨부 섹션 아래 `section.sheet-comments`: 제목 `댓글 <span class="count" data-comment-count>`, 목록 `ul.comment-list`(행: 작성자 · 회사 · `M/D HH:MM`, 본문 pre-wrap, 삭제 버튼 `data-comment-action="delete" data-comment="<id>"`), 입력 `textarea name="comment" rows=2 maxlength=2000 placeholder="댓글을 입력하세요"` + `등록` 버튼. 시트가 열리면 `handlers.subscribeComments(task, onChange, onError)`로 구독하고 반환된 unsubscribe를 `onClose`에서 호출. 등록·삭제 전 `requireIdentity`. 카드·행 제목 옆에 `💬N`(`commentCount > 0`일 때, `.att-count`와 같은 스타일 `.comment-count`).
+
+**main.js** 핸들러 추가: `subscribeComments: (t, onChange, onError) => subscribeComments(state.key, t.id, onChange, onError)`, `onAddComment: async (t, text) => { await addComment(state.key, t.id, text, state.identity); await afterAttachmentChange(t.id); }`, `onDeleteComment` 동일 패턴.
+
+**테스트** `validateComment`: 공백만 → 오류, 2000자 OK, 2001자 오류. 규칙: 유효 댓글 생성·읽기·삭제 OK, 빈 text 거부, 2001자 거부, 필드 추가 거부, 수정 거부, task `commentCount` 음수 거부 — 기존 attachments 테스트 안에 이어서 넣어 orphan room 증가 없이.
+
+**스펙 10-4** "댓글: 항목마다 댓글 스레드. 이름·회사·시각 표시, 실시간, 삭제 가능(키 소지자 누구나). 카드에 💬 수."
