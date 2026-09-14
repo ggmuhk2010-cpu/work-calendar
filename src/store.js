@@ -1,7 +1,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
   getFirestore, doc, collection, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  query, where, orderBy, onSnapshot, serverTimestamp,
+  query, where, orderBy, onSnapshot, serverTimestamp, writeBatch, increment,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import { generateKey } from './key.js';
 
@@ -14,6 +14,8 @@ export function initStore(config) {
 
 const roomRef = (key) => doc(db, 'rooms', key);
 const tasksRef = (key) => collection(db, 'rooms', key, 'tasks');
+const attRef = (key, taskId) => collection(db, 'rooms', key, 'tasks', taskId, 'attachments');
+const blobRef = (key, taskId, attId) => doc(db, 'rooms', key, 'tasks', taskId, 'attachments', attId, 'blob', 'data');
 
 export async function createRoom(name) {
   const key = generateKey();
@@ -31,17 +33,20 @@ function normalize(snap) {
   const d = snap.data({ serverTimestamps: 'estimate' });
   return {
     id: snap.id,
+    kind: d.kind ?? 'request',
     title: d.title,
     memo: d.memo ?? '',
     start: d.start,
     end: d.end,
-    toCompany: d.toCompany,
+    time: d.time ?? '',
+    toCompany: d.toCompany ?? '',
     assignee: d.assignee ?? '',
     fromName: d.fromName,
     fromCompany: d.fromCompany,
     status: d.status,
     doneBy: d.doneBy ?? '',
     doneAtMs: d.doneAt ? d.doneAt.toMillis() : null,
+    attachmentCount: d.attachmentCount ?? 0,
     updatedAtMs: d.updatedAt ? d.updatedAt.toMillis() : null,
     updatedBy: d.updatedBy ?? '',
   };
@@ -65,10 +70,12 @@ export async function getTask(key, id) {
 
 export async function addTask(key, value, identity) {
   const ref = await addDoc(tasksRef(key), {
+    kind: value.kind,
     title: value.title,
     memo: value.memo,
     start: value.start,
     end: value.end,
+    time: value.time,
     toCompany: value.toCompany,
     assignee: value.assignee,
     fromName: identity.name,
@@ -76,6 +83,7 @@ export async function addTask(key, value, identity) {
     status: 'open',
     doneAt: null,
     doneBy: '',
+    attachmentCount: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     updatedBy: identity.name,
@@ -85,10 +93,12 @@ export async function addTask(key, value, identity) {
 
 export async function updateTask(key, id, value, identity) {
   await updateDoc(doc(tasksRef(key), id), {
+    kind: value.kind,
     title: value.title,
     memo: value.memo,
     start: value.start,
     end: value.end,
+    time: value.time,
     toCompany: value.toCompany,
     assignee: value.assignee,
     updatedAt: serverTimestamp(),
@@ -103,6 +113,79 @@ export async function setDone(key, id, done, identity) {
   await updateDoc(doc(tasksRef(key), id), { ...patch, updatedAt: serverTimestamp(), updatedBy: identity.name });
 }
 
+/** 항목과 그 첨부(메타·내용)를 한 배치로 지운다. Firestore는 하위 컬렉션을 자동으로 지우지 않는다. */
 export async function deleteTask(key, id) {
-  await deleteDoc(doc(tasksRef(key), id));
+  const atts = await getDocs(attRef(key, id));
+  const batch = writeBatch(db);
+  for (const a of atts.docs) {
+    batch.delete(a.ref);
+    if (a.data().kind === 'file') batch.delete(blobRef(key, id, a.id));
+  }
+  batch.delete(doc(tasksRef(key), id));
+  await batch.commit();
+}
+
+// ---------- 첨부 ----------
+function normalizeAttachment(snap) {
+  const d = snap.data({ serverTimestamps: 'estimate' });
+  return {
+    id: snap.id,
+    kind: d.kind,
+    name: d.name,
+    type: d.type ?? '',
+    size: d.size ?? 0,
+    storedSize: d.storedSize ?? 0,
+    encoding: d.encoding ?? 'none',
+    url: d.url ?? '',
+    uploadedBy: d.uploadedBy ?? '',
+    createdAtMs: d.createdAt ? d.createdAt.toMillis() : null,
+  };
+}
+
+export async function listAttachments(key, taskId) {
+  const qs = await getDocs(query(attRef(key, taskId), orderBy('createdAt')));
+  return qs.docs.map(normalizeAttachment);
+}
+
+export async function getAttachmentData(key, taskId, attId) {
+  const snap = await getDoc(blobRef(key, taskId, attId));
+  return snap.exists() ? snap.data().data : null;
+}
+
+function touchTask(batch, key, taskId, delta, identity) {
+  batch.update(doc(tasksRef(key), taskId), {
+    attachmentCount: increment(delta), updatedAt: serverTimestamp(), updatedBy: identity.name,
+  });
+}
+
+/** file: { name, type, size, storedSize, encoding, data } — data는 base64 문자열 */
+export async function addFileAttachment(key, taskId, file, identity) {
+  const batch = writeBatch(db);
+  const ref = doc(attRef(key, taskId));
+  batch.set(ref, {
+    kind: 'file', name: file.name, type: file.type, size: file.size, storedSize: file.storedSize,
+    encoding: file.encoding, uploadedBy: identity.name, createdAt: serverTimestamp(),
+  });
+  batch.set(blobRef(key, taskId, ref.id), { data: file.data });
+  touchTask(batch, key, taskId, 1, identity);
+  await batch.commit();
+  return ref.id;
+}
+
+/** link: { name, url } */
+export async function addLinkAttachment(key, taskId, link, identity) {
+  const batch = writeBatch(db);
+  const ref = doc(attRef(key, taskId));
+  batch.set(ref, { kind: 'link', name: link.name, url: link.url, uploadedBy: identity.name, createdAt: serverTimestamp() });
+  touchTask(batch, key, taskId, 1, identity);
+  await batch.commit();
+  return ref.id;
+}
+
+export async function deleteAttachment(key, taskId, att, identity) {
+  const batch = writeBatch(db);
+  batch.delete(doc(attRef(key, taskId), att.id));
+  if (att.kind === 'file') batch.delete(blobRef(key, taskId, att.id));
+  touchTask(batch, key, taskId, -1, identity);
+  await batch.commit();
 }

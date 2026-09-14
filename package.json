@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/calendar.test.mjs test/colors.test.mjs test/validate.test.mjs test/key.test.mjs test/identity.test.mjs",
+    "test": "node --test test/calendar.test.mjs test/colors.test.mjs test/validate.test.mjs test/key.test.mjs test/identity.test.mjs test/links.test.mjs test/files.test.mjs",
     "test:rules": "node --test test/rules.test.mjs"
   },
   "devDependencies": {

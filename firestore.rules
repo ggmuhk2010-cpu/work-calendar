@@ -6,27 +6,51 @@ service cloud.firestore {
     function str(v, max) { return v is string && v.size() <= max; }
     function nonEmpty(v, max) { return str(v, max) && v.size() >= 1; }
     function dateStr(v) { return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+    function timeStr(v) { return v is string && (v == '' || v.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')); }
 
     function taskFields() {
-      return ['title', 'memo', 'start', 'end', 'toCompany', 'assignee', 'fromName', 'fromCompany',
-              'status', 'doneAt', 'doneBy', 'createdAt', 'updatedAt', 'updatedBy'];
+      return ['kind', 'title', 'memo', 'start', 'end', 'time', 'toCompany', 'assignee', 'fromName', 'fromCompany',
+              'status', 'doneAt', 'doneBy', 'attachmentCount', 'createdAt', 'updatedAt', 'updatedBy'];
     }
 
     function validTask(d) {
       return d.keys().hasOnly(taskFields()) && d.keys().hasAll(taskFields())
+        && d.kind in ['request', 'event']
         && nonEmpty(d.title, 120)
-        && str(d.memo, 2000)
+        && str(d.memo, 5000)
         && dateStr(d.start) && dateStr(d.end) && d.start <= d.end
-        && nonEmpty(d.toCompany, 40)
+        && timeStr(d.time)
+        && ((d.kind == 'request' && nonEmpty(d.toCompany, 40)) || (d.kind == 'event' && str(d.toCompany, 40)))
         && str(d.assignee, 40)
         && nonEmpty(d.fromName, 40)
         && nonEmpty(d.fromCompany, 40)
         && d.status in ['open', 'done']
         && ((d.status == 'done' && d.doneAt is timestamp) || (d.status == 'open' && d.doneAt == null))
         && str(d.doneBy, 40)
+        && d.attachmentCount is int && d.attachmentCount >= 0 && d.attachmentCount <= 10
         && d.createdAt is timestamp
         && d.updatedAt == request.time
         && nonEmpty(d.updatedBy, 40);
+    }
+
+    function fileFields() { return ['kind', 'name', 'type', 'size', 'storedSize', 'encoding', 'uploadedBy', 'createdAt']; }
+    function linkFields() { return ['kind', 'name', 'url', 'uploadedBy', 'createdAt']; }
+
+    function validAttachment(d) {
+      return nonEmpty(d.uploadedBy, 40) && d.createdAt == request.time
+        && (
+          (d.kind == 'file'
+            && d.keys().hasOnly(fileFields()) && d.keys().hasAll(fileFields())
+            && nonEmpty(d.name, 200) && str(d.type, 100)
+            && d.size is int && d.size >= 1 && d.size <= 20971520
+            && d.storedSize is int && d.storedSize >= 1 && d.storedSize <= 716800
+            && d.encoding in ['gzip', 'none'])
+          ||
+          (d.kind == 'link'
+            && d.keys().hasOnly(linkFields()) && d.keys().hasAll(linkFields())
+            && str(d.name, 200)
+            && d.url is string && d.url.size() <= 2000 && d.url.matches('^https?://.+'))
+        );
     }
 
     match /rooms/{key} {
@@ -45,11 +69,24 @@ service cloud.firestore {
         allow update: if validKey(key) && validTask(request.resource.data)
           && request.resource.data.createdAt == resource.data.createdAt;
         allow delete: if validKey(key);
-      }
-    }
 
-    match /{document=**} {
-      allow read, write: if false;
+        match /attachments/{attId} {
+          allow read: if validKey(key);
+          allow create: if validKey(key) && validAttachment(request.resource.data);
+          allow update: if false;
+          allow delete: if validKey(key);
+
+          match /blob/{blobId} {
+            allow read: if validKey(key);
+            allow create: if validKey(key) && blobId == 'data'
+              && request.resource.data.keys().hasOnly(['data'])
+              && request.resource.data.keys().hasAll(['data'])
+              && nonEmpty(request.resource.data.data, 960000);
+            allow update: if false;
+            allow delete: if validKey(key);
+          }
+        }
+      }
     }
   }
 }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   toDateStr, parseDateStr, isDateStr, addDays, addMonths, monthOf, monthRange, monthGrid,
-  formatMonthTitle, formatDayTitle, tasksOnDate, groupForList, companiesOf, isOverdue,
+  formatMonthTitle, formatDayTitle, tasksOnDate, groupForList, companiesOf, isOverdue, upcomingEvents, byStartTime,
 } from '../src/calendar.js';
 
 test('toDateStr/parseDateStr round-trip and reject invalid', () => {
@@ -29,7 +29,7 @@ test('addMonths, monthOf, monthRange', () => {
 });
 
 test('monthGrid: 42 cells, Sunday start, inMonth flags', () => {
-  const cells = monthGrid({ year: 2026, month: 9 }); // 2026-09-01 is a Tuesday
+  const cells = monthGrid({ year: 2026, month: 9 });
   assert.equal(cells.length, 42);
   assert.deepEqual(cells[0], { date: '2026-08-30', day: 30, dow: 0, inMonth: false });
   assert.deepEqual(cells[2], { date: '2026-09-01', day: 1, dow: 2, inMonth: true });
@@ -44,22 +44,31 @@ test('formatters', () => {
 });
 
 const T = (o) => ({
-  id: 'x', title: 't', start: '2026-09-10', end: '2026-09-10', toCompany: 'A',
+  id: 'x', kind: 'request', title: 't', start: '2026-09-10', end: '2026-09-10', time: '', toCompany: 'A',
   status: 'open', doneAtMs: null, ...o,
 });
 
-test('tasksOnDate includes multi-day ranges inclusively', () => {
+test('tasksOnDate includes multi-day ranges inclusively and sorts by start, time, title', () => {
   const tasks = [
-    T({ id: '1' }),
+    T({ id: '1', time: '14:00' }),
     T({ id: '2', start: '2026-09-08', end: '2026-09-12' }),
     T({ id: '3', start: '2026-09-11', end: '2026-09-11' }),
+    T({ id: '4', time: '09:00' }),
   ];
-  assert.deepEqual(tasksOnDate(tasks, '2026-09-10').map((t) => t.id), ['1', '2']);
+  assert.deepEqual(tasksOnDate(tasks, '2026-09-10').map((t) => t.id), ['2', '4', '1']);
   assert.deepEqual(tasksOnDate(tasks, '2026-09-12').map((t) => t.id), ['2']);
   assert.deepEqual(tasksOnDate(tasks, '2026-09-13'), []);
 });
 
-test('groupForList: mine/others by company, sorted by end, recent done within 30 days newest first', () => {
+test('byStartTime orders by start, then time (empty first), then title', () => {
+  const a = T({ start: '2026-09-10', time: '', title: 'b' });
+  const b = T({ start: '2026-09-10', time: '', title: 'a' });
+  const c = T({ start: '2026-09-10', time: '08:00', title: 'z' });
+  const d = T({ start: '2026-09-09', time: '23:00', title: 'z' });
+  assert.deepEqual([a, b, c, d].sort(byStartTime).map((t) => t.title + t.start + t.time), ['z2026-09-0923:00', 'a2026-09-10', 'b2026-09-10', 'z2026-09-1008:00']);
+});
+
+test('groupForList: requests only in mine/others/recentDone; events in events (next 30 days)', () => {
   const today = '2026-09-14';
   const tasks = [
     T({ id: 'a', toCompany: 'A', start: '2026-09-20', end: '2026-09-20' }),
@@ -68,19 +77,26 @@ test('groupForList: mine/others by company, sorted by end, recent done within 30
     T({ id: 'd', toCompany: 'A', status: 'done', doneAtMs: new Date(2026, 8, 10).getTime() }),
     T({ id: 'e', toCompany: 'B', status: 'done', doneAtMs: new Date(2026, 6, 1).getTime() }),
     T({ id: 'f', toCompany: 'B', status: 'done', doneAtMs: new Date(2026, 8, 12).getTime() }),
+    T({ id: 'g', kind: 'event', toCompany: 'A', start: '2026-09-16', end: '2026-09-16', time: '10:00' }),
+    T({ id: 'h', kind: 'event', toCompany: '', start: '2026-09-14', end: '2026-09-14', time: '15:00' }),
+    T({ id: 'i', kind: 'event', toCompany: '', start: '2026-10-20', end: '2026-10-20' }),
+    T({ id: 'j', kind: 'event', toCompany: '', start: '2026-09-01', end: '2026-09-01' }),
   ];
   const g = groupForList(tasks, today, 'A');
   assert.deepEqual(g.mine.map((t) => t.id), ['b', 'a']);
   assert.deepEqual(g.others.map((t) => t.id), ['c']);
   assert.deepEqual(g.recentDone.map((t) => t.id), ['f', 'd']);
+  assert.deepEqual(g.events.map((t) => t.id), ['h', 'g']);
   const g2 = groupForList(tasks, today, null);
   assert.deepEqual(g2.mine, []);
   assert.deepEqual(g2.others.map((t) => t.id), ['c', 'b', 'a']);
+  assert.deepEqual(upcomingEvents(tasks, today, 60).map((t) => t.id), ['h', 'g', 'i']);
 });
 
-test('companiesOf distinct + sorted; isOverdue only for open tasks past end', () => {
-  assert.deepEqual(companiesOf([T({ toCompany: '나' }), T({ toCompany: '가' }), T({ toCompany: '나' })]), ['가', '나']);
+test('companiesOf distinct + sorted (empty company skipped); isOverdue only for open requests past end', () => {
+  assert.deepEqual(companiesOf([T({ toCompany: '나' }), T({ toCompany: '가' }), T({ toCompany: '나' }), T({ toCompany: '' })]), ['가', '나']);
   assert.equal(isOverdue(T({ end: '2026-09-13' }), '2026-09-14'), true);
   assert.equal(isOverdue(T({ end: '2026-09-14' }), '2026-09-14'), false);
   assert.equal(isOverdue(T({ end: '2026-09-13', status: 'done' }), '2026-09-14'), false);
+  assert.equal(isOverdue(T({ end: '2026-09-13', kind: 'event' }), '2026-09-14'), false);
 });
