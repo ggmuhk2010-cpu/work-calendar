@@ -2111,3 +2111,899 @@ Expected: 몇 분 안에 `200`. `TIMEOUT`이면 `gh api repos/ggmuhk2010-cpu/wor
 - Task 5: 실시간 창(60일) 밖 문서에 쓴 뒤 `store.getTask`로 다시 읽어 갱신(`refreshArchived`), `ensureArchive`를 `next`·`boot`에서도 호출, 캘린더 생성 직후에는 신원 모달을 띄우지 않음(`boot({ skipIdentityPrompt })`), `boot` 재진입 가드(세대 카운터), 필터 정리는 `render()` 밖(`pruneFilter`)으로 이동, 상단 바에 `+ 작업 요청` 버튼 추가, 모달을 겹쳐 열면 이전 모달을 정리(`modals.js currentClose`).
 - Task 6: 프로젝트는 CLI `projects:create`가 403(Firebase 약관 미동의)으로 실패해 사용자가 콘솔에서 생성(`work-calendar-dz7gy6-e2d5f`). CLI가 만든 빈 GCP 프로젝트 `work-calendar-dz7gy6`는 Firebase 없이 남아 있음. `firestore:databases:create`는 API 활성화 전파 대기(약 75초) 후 성공.
 - Task 7: 규칙 테스트에 `rooms` 컬렉션 나열 거부 확인 추가(5개 테스트).
+
+---
+
+# v1.1 확장 태스크 (스펙 10장)
+
+### Task 10: 데이터 계층 — 종류·시간·본문 5,000자·첨부 (검증·달력 로직·링크·파일·스토어·규칙·테스트)
+
+**Files:**
+- Modify: `src/validate.js`, `src/calendar.js`, `src/store.js`, `firestore.rules`, `package.json`(test 스크립트)
+- Create: `src/links.js`, `src/files.js`
+- Test: `test/validate.test.mjs`(전면 교체), `test/calendar.test.mjs`(전면 교체), `test/links.test.mjs`, `test/files.test.mjs`, `test/rules.test.mjs`(전면 교체)
+
+**Interfaces:**
+- Consumes: 기존 `isDateStr`, `addDays`, `generateKey`.
+- Produces:
+  - `validate.js`: `LIMITS = { title:120, company:40, person:40, memo:5000, roomName:60, attachmentName:200, url:2000, fileStored:716800, fileOriginal:20971520, attachmentsPerTask:10 }`, `KINDS = ['request','event']`, `validateTask(input)` → value에 `kind`, `time` 추가(담당 회사는 `request`만 필수), `validateLink({name,url}) → {ok, errors, value}`.
+  - `calendar.js`: `byStartTime(a,b)`, `tasksOnDate`(시간순 정렬), `isOverdue`(일정은 항상 false), `upcomingEvents(tasks, today, days=30)`, `groupForList` → `{mine, others, recentDone, events}` (mine/others/recentDone은 작업 요청만).
+  - `links.js`: `youtubeId(url) → string|null`, `hostOf(url) → string`, `formatBytes(n) → string`.
+  - `files.js`: `gzipBase64(bytes: Uint8Array) → Promise<{data, storedSize}>`, `gunzipBase64(data) → Promise<Uint8Array>`, `bytesToBase64`, `base64ToBytes`.
+  - `store.js`: Task 객체에 `kind`, `time`, `attachmentCount` 추가. 새 함수 `listAttachments(key, taskId) → Attachment[]` (`{id, kind, name, type, size, storedSize, encoding, url, uploadedBy, createdAtMs}`), `getAttachmentData(key, taskId, attId) → base64|null`, `addFileAttachment(key, taskId, {name,type,size,storedSize,encoding,data}, identity) → id`, `addLinkAttachment(key, taskId, {name,url}, identity) → id`, `deleteAttachment(key, taskId, att, identity)`, `deleteTask`는 첨부·내용 문서까지 배치 삭제.
+  - Firestore 경로: `rooms/{key}/tasks/{taskId}/attachments/{attId}`(메타), `…/attachments/{attId}/blob/data`(`{data}`).
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`test/validate.test.mjs` (전면 교체):
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { validateTask, validateIdentity, validateRoomName, validateLink, LIMITS, KINDS } from '../src/validate.js';
+
+const good = { title: ' 촬영 콘티 전달 ', toCompany: 'A사', assignee: '', start: '2026-09-14', end: '', memo: '' };
+
+test('LIMITS and KINDS match the spec', () => {
+  assert.deepEqual(LIMITS, { title: 120, company: 40, person: 40, memo: 5000, roomName: 60, attachmentName: 200, url: 2000, fileStored: 716800, fileOriginal: 20971520, attachmentsPerTask: 10 });
+  assert.deepEqual(KINDS, ['request', 'event']);
+});
+
+test('validateTask: trims, defaults end to start, kind defaults to request, time empty', () => {
+  const r = validateTask(good);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.errors, {});
+  assert.equal(r.value.title, '촬영 콘티 전달');
+  assert.equal(r.value.end, '2026-09-14');
+  assert.equal(r.value.kind, 'request');
+  assert.equal(r.value.time, '');
+});
+
+test('validateTask: required fields for request; event allows empty company', () => {
+  const r = validateTask({ ...good, title: '  ', toCompany: '' });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.title);
+  assert.ok(r.errors.toCompany);
+  const ev = validateTask({ ...good, kind: 'event', toCompany: '' });
+  assert.equal(ev.ok, true);
+  assert.equal(ev.value.kind, 'event');
+  assert.equal(validateTask({ ...good, kind: 'bogus' }).value.kind, 'request');
+});
+
+test('validateTask: length limits', () => {
+  assert.equal(validateTask({ ...good, title: '가'.repeat(120) }).ok, true);
+  assert.ok(validateTask({ ...good, title: '가'.repeat(121) }).errors.title);
+  assert.ok(validateTask({ ...good, toCompany: 'a'.repeat(41) }).errors.toCompany);
+  assert.ok(validateTask({ ...good, assignee: 'a'.repeat(41) }).errors.assignee);
+  assert.equal(validateTask({ ...good, memo: 'a'.repeat(5000) }).ok, true);
+  assert.ok(validateTask({ ...good, memo: 'a'.repeat(5001) }).errors.memo);
+});
+
+test('validateTask: dates and time', () => {
+  assert.ok(validateTask({ ...good, start: '' }).errors.start);
+  assert.ok(validateTask({ ...good, start: '2026-02-30' }).errors.start);
+  assert.ok(validateTask({ ...good, end: '2026-09-13' }).errors.end);
+  assert.ok(validateTask({ ...good, end: 'abc' }).errors.end);
+  assert.equal(validateTask({ ...good, end: '2026-09-20' }).ok, true);
+  assert.equal(validateTask({ ...good, time: '09:30' }).value.time, '09:30');
+  assert.equal(validateTask({ ...good, time: ' 23:59 ' }).ok, true);
+  assert.ok(validateTask({ ...good, time: '25:00' }).errors.time);
+  assert.ok(validateTask({ ...good, time: '9:30' }).errors.time);
+});
+
+test('validateLink', () => {
+  assert.deepEqual(validateLink({ name: ' 참고 ', url: 'https://youtu.be/dQw4w9WgXcQ' }), { ok: true, errors: {}, value: { name: '참고', url: 'https://youtu.be/dQw4w9WgXcQ' } });
+  assert.ok(validateLink({ name: '', url: 'javascript:alert(1)' }).errors.url);
+  assert.ok(validateLink({ name: '', url: 'ftp://x.com/a' }).errors.url);
+  assert.ok(validateLink({ name: '', url: '' }).errors.url);
+  assert.ok(validateLink({ name: 'a'.repeat(201), url: 'https://x.com' }).errors.name);
+  assert.ok(validateLink({ name: '', url: 'https://x.com/' + 'a'.repeat(2000) }).errors.url);
+});
+
+test('validateIdentity', () => {
+  const r = validateIdentity({ name: ' 홍길동 ', company: '빅웨이브' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.value, { name: '홍길동', company: '빅웨이브' });
+  assert.ok(validateIdentity({ name: '', company: 'x' }).errors.name);
+  assert.ok(validateIdentity({ name: 'x', company: 'a'.repeat(41) }).errors.company);
+  assert.ok(validateIdentity({}).errors.name);
+});
+
+test('validateRoomName', () => {
+  assert.deepEqual(validateRoomName(' 프로젝트 '), { ok: true, error: null, value: '프로젝트' });
+  assert.equal(validateRoomName('').ok, false);
+  assert.equal(validateRoomName('a'.repeat(61)).ok, false);
+  assert.equal(validateRoomName('a'.repeat(60)).ok, true);
+});
+```
+
+`test/calendar.test.mjs` (전면 교체 — 기존 테스트 + 종류·시간 케이스):
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  toDateStr, parseDateStr, isDateStr, addDays, addMonths, monthOf, monthRange, monthGrid,
+  formatMonthTitle, formatDayTitle, tasksOnDate, groupForList, companiesOf, isOverdue, upcomingEvents, byStartTime,
+} from '../src/calendar.js';
+
+test('toDateStr/parseDateStr round-trip and reject invalid', () => {
+  assert.equal(toDateStr(new Date(2026, 8, 14)), '2026-09-14');
+  assert.equal(parseDateStr('2026-09-14').getDate(), 14);
+  assert.equal(parseDateStr('2026-02-30'), null);
+  assert.equal(parseDateStr('2026-9-4'), null);
+  assert.equal(isDateStr('2024-02-29'), true);
+  assert.equal(isDateStr('2023-02-29'), false);
+});
+
+test('addDays crosses month and year boundaries', () => {
+  assert.equal(addDays('2026-01-31', 1), '2026-02-01');
+  assert.equal(addDays('2026-01-01', -1), '2025-12-31');
+  assert.equal(addDays('2026-03-01', -60), '2025-12-31');
+});
+
+test('addMonths, monthOf, monthRange', () => {
+  assert.deepEqual(addMonths({ year: 2026, month: 12 }, 1), { year: 2027, month: 1 });
+  assert.deepEqual(addMonths({ year: 2026, month: 1 }, -1), { year: 2025, month: 12 });
+  assert.deepEqual(monthOf('2026-09-14'), { year: 2026, month: 9 });
+  assert.deepEqual(monthRange({ year: 2026, month: 2 }), { first: '2026-02-01', last: '2026-02-28' });
+  assert.deepEqual(monthRange({ year: 2024, month: 2 }), { first: '2024-02-01', last: '2024-02-29' });
+});
+
+test('monthGrid: 42 cells, Sunday start, inMonth flags', () => {
+  const cells = monthGrid({ year: 2026, month: 9 });
+  assert.equal(cells.length, 42);
+  assert.deepEqual(cells[0], { date: '2026-08-30', day: 30, dow: 0, inMonth: false });
+  assert.deepEqual(cells[2], { date: '2026-09-01', day: 1, dow: 2, inMonth: true });
+  assert.equal(cells[41].date, '2026-10-10');
+  assert.equal(cells[41].inMonth, false);
+});
+
+test('formatters', () => {
+  assert.equal(formatMonthTitle({ year: 2026, month: 9 }), '2026년 9월');
+  assert.equal(formatDayTitle('2026-09-14'), '9월 14일 (월)');
+  assert.equal(formatDayTitle('2026-09-13'), '9월 13일 (일)');
+});
+
+const T = (o) => ({
+  id: 'x', kind: 'request', title: 't', start: '2026-09-10', end: '2026-09-10', time: '', toCompany: 'A',
+  status: 'open', doneAtMs: null, ...o,
+});
+
+test('tasksOnDate includes multi-day ranges inclusively and sorts by start, time, title', () => {
+  const tasks = [
+    T({ id: '1', time: '14:00' }),
+    T({ id: '2', start: '2026-09-08', end: '2026-09-12' }),
+    T({ id: '3', start: '2026-09-11', end: '2026-09-11' }),
+    T({ id: '4', time: '09:00' }),
+  ];
+  assert.deepEqual(tasksOnDate(tasks, '2026-09-10').map((t) => t.id), ['2', '4', '1']);
+  assert.deepEqual(tasksOnDate(tasks, '2026-09-12').map((t) => t.id), ['2']);
+  assert.deepEqual(tasksOnDate(tasks, '2026-09-13'), []);
+});
+
+test('byStartTime orders by start, then time (empty first), then title', () => {
+  const a = T({ start: '2026-09-10', time: '', title: 'b' });
+  const b = T({ start: '2026-09-10', time: '', title: 'a' });
+  const c = T({ start: '2026-09-10', time: '08:00', title: 'z' });
+  const d = T({ start: '2026-09-09', time: '23:00', title: 'z' });
+  assert.deepEqual([a, b, c, d].sort(byStartTime).map((t) => t.title + t.start + t.time), ['z2026-09-0923:00', 'a2026-09-10', 'b2026-09-10', 'z2026-09-1008:00']);
+});
+
+test('groupForList: requests only in mine/others/recentDone; events in events (next 30 days)', () => {
+  const today = '2026-09-14';
+  const tasks = [
+    T({ id: 'a', toCompany: 'A', start: '2026-09-20', end: '2026-09-20' }),
+    T({ id: 'b', toCompany: 'A', start: '2026-09-15', end: '2026-09-15' }),
+    T({ id: 'c', toCompany: 'B', start: '2026-09-01', end: '2026-09-01' }),
+    T({ id: 'd', toCompany: 'A', status: 'done', doneAtMs: new Date(2026, 8, 10).getTime() }),
+    T({ id: 'e', toCompany: 'B', status: 'done', doneAtMs: new Date(2026, 6, 1).getTime() }),
+    T({ id: 'f', toCompany: 'B', status: 'done', doneAtMs: new Date(2026, 8, 12).getTime() }),
+    T({ id: 'g', kind: 'event', toCompany: 'A', start: '2026-09-16', end: '2026-09-16', time: '10:00' }),
+    T({ id: 'h', kind: 'event', toCompany: '', start: '2026-09-14', end: '2026-09-14', time: '15:00' }),
+    T({ id: 'i', kind: 'event', toCompany: '', start: '2026-10-20', end: '2026-10-20' }),
+    T({ id: 'j', kind: 'event', toCompany: '', start: '2026-09-01', end: '2026-09-01' }),
+  ];
+  const g = groupForList(tasks, today, 'A');
+  assert.deepEqual(g.mine.map((t) => t.id), ['b', 'a']);
+  assert.deepEqual(g.others.map((t) => t.id), ['c']);
+  assert.deepEqual(g.recentDone.map((t) => t.id), ['f', 'd']);
+  assert.deepEqual(g.events.map((t) => t.id), ['h', 'g']);
+  const g2 = groupForList(tasks, today, null);
+  assert.deepEqual(g2.mine, []);
+  assert.deepEqual(g2.others.map((t) => t.id), ['c', 'b', 'a']);
+  assert.deepEqual(upcomingEvents(tasks, today, 60).map((t) => t.id), ['h', 'g', 'i']);
+});
+
+test('companiesOf distinct + sorted (empty company skipped); isOverdue only for open requests past end', () => {
+  assert.deepEqual(companiesOf([T({ toCompany: '나' }), T({ toCompany: '가' }), T({ toCompany: '나' }), T({ toCompany: '' })]), ['가', '나']);
+  assert.equal(isOverdue(T({ end: '2026-09-13' }), '2026-09-14'), true);
+  assert.equal(isOverdue(T({ end: '2026-09-14' }), '2026-09-14'), false);
+  assert.equal(isOverdue(T({ end: '2026-09-13', status: 'done' }), '2026-09-14'), false);
+  assert.equal(isOverdue(T({ end: '2026-09-13', kind: 'event' }), '2026-09-14'), false);
+});
+```
+
+`test/links.test.mjs`:
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { youtubeId, hostOf, formatBytes } from '../src/links.js';
+
+test('youtubeId recognizes watch, short, shorts, embed, live URLs and rejects others', () => {
+  assert.equal(youtubeId('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://youtu.be/dQw4w9WgXcQ?si=abc'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://youtube.com/shorts/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://m.youtube.com/watch?v=dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://www.youtube.com/embed/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://www.youtube.com/live/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+  assert.equal(youtubeId('https://www.youtube.com/watch?v=short'), null);
+  assert.equal(youtubeId('https://vimeo.com/123'), null);
+  assert.equal(youtubeId('not a url'), null);
+});
+
+test('hostOf and formatBytes', () => {
+  assert.equal(hostOf('https://www.notion.so/page'), 'notion.so');
+  assert.equal(hostOf('nope'), '');
+  assert.equal(formatBytes(512), '512 B');
+  assert.equal(formatBytes(2048), '2 KB');
+  assert.equal(formatBytes(1572864), '1.5 MB');
+});
+```
+
+`test/files.test.mjs`:
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { gzipBase64, gunzipBase64, bytesToBase64, base64ToBytes } from '../src/files.js';
+
+test('base64 helpers round-trip binary data', () => {
+  const bytes = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+  assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
+});
+
+test('gzipBase64 shrinks repetitive text and gunzipBase64 restores it exactly', async () => {
+  const text = '<html><body>' + '<p>촬영 구성안 본문 내용</p>'.repeat(4000) + '</body></html>';
+  const bytes = new TextEncoder().encode(text);
+  const { data, storedSize } = await gzipBase64(bytes);
+  assert.ok(storedSize < bytes.length / 5, `stored ${storedSize} vs ${bytes.length}`);
+  assert.ok(data.length <= Math.ceil(storedSize / 3) * 4);
+  const back = await gunzipBase64(data);
+  assert.equal(new TextDecoder().decode(back), text);
+});
+```
+
+`package.json`의 `test` 스크립트를 아래로 바꾼다:
+```
+"test": "node --test test/calendar.test.mjs test/colors.test.mjs test/validate.test.mjs test/key.test.mjs test/identity.test.mjs test/links.test.mjs test/files.test.mjs",
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `npm test`
+Expected: validate(KINDS 없음), calendar(`upcomingEvents`/`byStartTime` 없음), links/files(모듈 없음) FAIL. colors/key/identity PASS.
+
+- [ ] **Step 3: 구현 — `src/validate.js` (전면 교체)**
+
+```js
+import { isDateStr } from './calendar.js';
+
+export const LIMITS = {
+  title: 120, company: 40, person: 40, memo: 5000, roomName: 60,
+  attachmentName: 200, url: 2000, fileStored: 716800, fileOriginal: 20971520, attachmentsPerTask: 10,
+};
+export const KINDS = ['request', 'event'];
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function trimStr(v) { return typeof v === 'string' ? v.trim() : ''; }
+
+function checkLen(v, max, label, required) {
+  if (required && !v) return `${label}을(를) 입력하세요.`;
+  if (v.length > max) return `${label}은(는) ${max}자 이하로 입력하세요.`;
+  return null;
+}
+
+export function validateTask(input = {}) {
+  const kind = KINDS.includes(input.kind) ? input.kind : 'request';
+  const v = {
+    kind,
+    title: trimStr(input.title),
+    toCompany: trimStr(input.toCompany),
+    assignee: trimStr(input.assignee),
+    start: trimStr(input.start),
+    end: trimStr(input.end),
+    time: trimStr(input.time),
+    memo: trimStr(input.memo),
+  };
+  const errors = {};
+  const put = (field, msg) => { if (msg) errors[field] = msg; };
+  put('title', checkLen(v.title, LIMITS.title, '제목', true));
+  put('toCompany', checkLen(v.toCompany, LIMITS.company, kind === 'request' ? '담당 회사' : '관련 회사', kind === 'request'));
+  put('assignee', checkLen(v.assignee, LIMITS.person, '담당자', false));
+  put('memo', checkLen(v.memo, LIMITS.memo, '본문', false));
+  if (!isDateStr(v.start)) errors.start = '시작일을 선택하세요.';
+  if (!v.end) v.end = v.start;
+  if (!errors.start) {
+    if (!isDateStr(v.end)) errors.end = '마감일 형식이 올바르지 않습니다.';
+    else if (v.end < v.start) errors.end = '마감일은 시작일 이후여야 합니다.';
+  }
+  if (v.time && !TIME_RE.test(v.time)) errors.time = '시간은 HH:MM 형식으로 입력하세요.';
+  return { ok: Object.keys(errors).length === 0, errors, value: v };
+}
+
+export function validateLink(input = {}) {
+  const v = { name: trimStr(input.name), url: trimStr(input.url) };
+  const errors = {};
+  if (!/^https?:\/\/\S+$/i.test(v.url)) errors.url = 'http:// 또는 https://로 시작하는 주소를 입력하세요.';
+  else if (v.url.length > LIMITS.url) errors.url = `주소는 ${LIMITS.url}자 이하여야 합니다.`;
+  if (v.name.length > LIMITS.attachmentName) errors.name = `제목은 ${LIMITS.attachmentName}자 이하로 입력하세요.`;
+  return { ok: Object.keys(errors).length === 0, errors, value: v };
+}
+
+export function validateIdentity(input = {}) {
+  const v = { name: trimStr(input.name), company: trimStr(input.company) };
+  const errors = {};
+  const put = (field, msg) => { if (msg) errors[field] = msg; };
+  put('name', checkLen(v.name, LIMITS.person, '이름', true));
+  put('company', checkLen(v.company, LIMITS.company, '회사', true));
+  return { ok: Object.keys(errors).length === 0, errors, value: v };
+}
+
+export function validateRoomName(input) {
+  const value = trimStr(input);
+  const error = checkLen(value, LIMITS.roomName, '캘린더 이름', true);
+  return { ok: error === null, error, value };
+}
+```
+
+- [ ] **Step 4: 구현 — `src/calendar.js`**
+
+아래 함수들을 교체·추가한다(나머지는 그대로).
+```js
+export const byStartTime = (a, b) => {
+  if (a.start !== b.start) return a.start < b.start ? -1 : 1;
+  const ta = a.time || '';
+  const tb = b.time || '';
+  if (ta !== tb) return ta < tb ? -1 : 1;
+  return a.title.localeCompare(b.title, 'ko');
+};
+
+export function tasksOnDate(tasks, date) {
+  return tasks.filter((t) => t.start <= date && date <= t.end).sort(byStartTime);
+}
+
+export function isOverdue(task, today) {
+  return task.kind !== 'event' && task.status === 'open' && task.end < today;
+}
+
+export function companiesOf(tasks) {
+  return [...new Set(tasks.map((t) => t.toCompany).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ko'));
+}
+
+/** 오늘부터 days일 안에 걸치는 일정(kind === 'event'), 날짜·시간순 */
+export function upcomingEvents(tasks, today, days = 30) {
+  const until = addDays(today, days);
+  return tasks.filter((t) => t.kind === 'event' && t.end >= today && t.start <= until).sort(byStartTime);
+}
+
+const byEnd = (a, b) => (a.end < b.end ? -1 : a.end > b.end ? 1 : a.title.localeCompare(b.title, 'ko'));
+
+/** 할 일 탭 그룹화. mine/others/recentDone은 작업 요청만, events는 일정만. */
+export function groupForList(tasks, today, myCompany) {
+  const requests = tasks.filter((t) => t.kind !== 'event');
+  const open = requests.filter((t) => t.status === 'open');
+  const isMine = (t) => Boolean(myCompany) && t.toCompany === myCompany;
+  const mine = open.filter(isMine).sort(byEnd);
+  const others = open.filter((t) => !isMine(t)).sort(byEnd);
+  const cutoffMs = parseDateStr(addDays(today, -30)).getTime();
+  const recentDone = requests
+    .filter((t) => t.status === 'done' && typeof t.doneAtMs === 'number' && t.doneAtMs >= cutoffMs)
+    .sort((a, b) => b.doneAtMs - a.doneAtMs);
+  return { mine, others, recentDone, events: upcomingEvents(tasks, today) };
+}
+```
+
+- [ ] **Step 5: 구현 — `src/links.js`, `src/files.js`**
+
+`src/links.js`:
+```js
+// 링크 첨부용 순수 도우미. DOM·Firebase 의존 없음.
+export function youtubeId(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const host = u.hostname.replace(/^(www|m)\./, '');
+  let id = null;
+  if (host === 'youtu.be') id = u.pathname.slice(1).split('/')[0];
+  else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+    if (u.pathname === '/watch') id = u.searchParams.get('v');
+    else { const m = /^\/(?:shorts|embed|live|v)\/([^/?]+)/.exec(u.pathname); if (m) id = m[1]; }
+  }
+  return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+}
+
+export function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+export function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+```
+
+`src/files.js`:
+```js
+// 파일 내용을 gzip 압축 + base64로 만들어 Firestore 문서(1 MiB 한도) 하나에 넣는다. 브라우저·Node 18+ 공통 API만 쓴다.
+export function bytesToBase64(bytes) {
+  let s = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  return btoa(s);
+}
+
+export function base64ToBytes(b64) {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+export async function gzipBase64(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+  const gz = new Uint8Array(await new Response(stream).arrayBuffer());
+  return { data: bytesToBase64(gz), storedSize: gz.length };
+}
+
+export async function gunzipBase64(data) {
+  const stream = new Blob([base64ToBytes(data)]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+```
+
+- [ ] **Step 6: 단위 테스트 통과 확인**
+
+Run: `npm test`
+Expected: 7개 파일 전부 PASS, fail 0, 경고 없음.
+
+- [ ] **Step 7: 구현 — `src/store.js` (전면 교체)**
+
+```js
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
+import {
+  getFirestore, doc, collection, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
+  query, where, orderBy, onSnapshot, serverTimestamp, writeBatch, increment,
+} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+import { generateKey } from './key.js';
+
+let db = null;
+
+export function initStore(config) {
+  db = getFirestore(initializeApp(config));
+  return db;
+}
+
+const roomRef = (key) => doc(db, 'rooms', key);
+const tasksRef = (key) => collection(db, 'rooms', key, 'tasks');
+const attRef = (key, taskId) => collection(db, 'rooms', key, 'tasks', taskId, 'attachments');
+const blobRef = (key, taskId, attId) => doc(db, 'rooms', key, 'tasks', taskId, 'attachments', attId, 'blob', 'data');
+
+export async function createRoom(name) {
+  const key = generateKey();
+  await setDoc(roomRef(key), { name, createdAt: serverTimestamp() });
+  return key;
+}
+
+export async function getRoom(key) {
+  const snap = await getDoc(roomRef(key));
+  return snap.exists() ? { name: snap.data().name } : null;
+}
+
+// 서버 시각이 아직 안 온 로컬 쓰기(pending)는 추정치를 쓴다. 안 그러면 updatedAt이 null로 온다.
+function normalize(snap) {
+  const d = snap.data({ serverTimestamps: 'estimate' });
+  return {
+    id: snap.id,
+    kind: d.kind ?? 'request',
+    title: d.title,
+    memo: d.memo ?? '',
+    start: d.start,
+    end: d.end,
+    time: d.time ?? '',
+    toCompany: d.toCompany ?? '',
+    assignee: d.assignee ?? '',
+    fromName: d.fromName,
+    fromCompany: d.fromCompany,
+    status: d.status,
+    doneBy: d.doneBy ?? '',
+    doneAtMs: d.doneAt ? d.doneAt.toMillis() : null,
+    attachmentCount: d.attachmentCount ?? 0,
+    updatedAtMs: d.updatedAt ? d.updatedAt.toMillis() : null,
+    updatedBy: d.updatedBy ?? '',
+  };
+}
+
+export function subscribeTasks(key, fromDate, onChange, onError) {
+  const q = query(tasksRef(key), where('start', '>=', fromDate), orderBy('start'));
+  return onSnapshot(q, (qs) => onChange(qs.docs.map(normalize)), onError);
+}
+
+export async function fetchTasksInRange(key, from, to) {
+  const q = query(tasksRef(key), where('start', '>=', from), where('start', '<=', to), orderBy('start'));
+  const qs = await getDocs(q);
+  return qs.docs.map(normalize);
+}
+
+export async function getTask(key, id) {
+  const snap = await getDoc(doc(tasksRef(key), id));
+  return snap.exists() ? normalize(snap) : null;
+}
+
+export async function addTask(key, value, identity) {
+  const ref = await addDoc(tasksRef(key), {
+    kind: value.kind,
+    title: value.title,
+    memo: value.memo,
+    start: value.start,
+    end: value.end,
+    time: value.time,
+    toCompany: value.toCompany,
+    assignee: value.assignee,
+    fromName: identity.name,
+    fromCompany: identity.company,
+    status: 'open',
+    doneAt: null,
+    doneBy: '',
+    attachmentCount: 0,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    updatedBy: identity.name,
+  });
+  return ref.id;
+}
+
+export async function updateTask(key, id, value, identity) {
+  await updateDoc(doc(tasksRef(key), id), {
+    kind: value.kind,
+    title: value.title,
+    memo: value.memo,
+    start: value.start,
+    end: value.end,
+    time: value.time,
+    toCompany: value.toCompany,
+    assignee: value.assignee,
+    updatedAt: serverTimestamp(),
+    updatedBy: identity.name,
+  });
+}
+
+export async function setDone(key, id, done, identity) {
+  const patch = done
+    ? { status: 'done', doneAt: serverTimestamp(), doneBy: identity.name }
+    : { status: 'open', doneAt: null, doneBy: '' };
+  await updateDoc(doc(tasksRef(key), id), { ...patch, updatedAt: serverTimestamp(), updatedBy: identity.name });
+}
+
+/** 항목과 그 첨부(메타·내용)를 한 배치로 지운다. Firestore는 하위 컬렉션을 자동으로 지우지 않는다. */
+export async function deleteTask(key, id) {
+  const atts = await getDocs(attRef(key, id));
+  const batch = writeBatch(db);
+  for (const a of atts.docs) {
+    batch.delete(a.ref);
+    if (a.data().kind === 'file') batch.delete(blobRef(key, id, a.id));
+  }
+  batch.delete(doc(tasksRef(key), id));
+  await batch.commit();
+}
+
+// ---------- 첨부 ----------
+function normalizeAttachment(snap) {
+  const d = snap.data({ serverTimestamps: 'estimate' });
+  return {
+    id: snap.id,
+    kind: d.kind,
+    name: d.name,
+    type: d.type ?? '',
+    size: d.size ?? 0,
+    storedSize: d.storedSize ?? 0,
+    encoding: d.encoding ?? 'none',
+    url: d.url ?? '',
+    uploadedBy: d.uploadedBy ?? '',
+    createdAtMs: d.createdAt ? d.createdAt.toMillis() : null,
+  };
+}
+
+export async function listAttachments(key, taskId) {
+  const qs = await getDocs(query(attRef(key, taskId), orderBy('createdAt')));
+  return qs.docs.map(normalizeAttachment);
+}
+
+export async function getAttachmentData(key, taskId, attId) {
+  const snap = await getDoc(blobRef(key, taskId, attId));
+  return snap.exists() ? snap.data().data : null;
+}
+
+function touchTask(batch, key, taskId, delta, identity) {
+  batch.update(doc(tasksRef(key), taskId), {
+    attachmentCount: increment(delta), updatedAt: serverTimestamp(), updatedBy: identity.name,
+  });
+}
+
+/** file: { name, type, size, storedSize, encoding, data } — data는 base64 문자열 */
+export async function addFileAttachment(key, taskId, file, identity) {
+  const batch = writeBatch(db);
+  const ref = doc(attRef(key, taskId));
+  batch.set(ref, {
+    kind: 'file', name: file.name, type: file.type, size: file.size, storedSize: file.storedSize,
+    encoding: file.encoding, uploadedBy: identity.name, createdAt: serverTimestamp(),
+  });
+  batch.set(blobRef(key, taskId, ref.id), { data: file.data });
+  touchTask(batch, key, taskId, 1, identity);
+  await batch.commit();
+  return ref.id;
+}
+
+/** link: { name, url } */
+export async function addLinkAttachment(key, taskId, link, identity) {
+  const batch = writeBatch(db);
+  const ref = doc(attRef(key, taskId));
+  batch.set(ref, { kind: 'link', name: link.name, url: link.url, uploadedBy: identity.name, createdAt: serverTimestamp() });
+  touchTask(batch, key, taskId, 1, identity);
+  await batch.commit();
+  return ref.id;
+}
+
+export async function deleteAttachment(key, taskId, att, identity) {
+  const batch = writeBatch(db);
+  batch.delete(doc(attRef(key, taskId), att.id));
+  if (att.kind === 'file') batch.delete(blobRef(key, taskId, att.id));
+  touchTask(batch, key, taskId, -1, identity);
+  await batch.commit();
+}
+```
+
+- [ ] **Step 8: 구현 — `firestore.rules` (전면 교체)**
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function validKey(k) { return k.matches('^[a-z0-9]{20,64}$'); }
+    function str(v, max) { return v is string && v.size() <= max; }
+    function nonEmpty(v, max) { return str(v, max) && v.size() >= 1; }
+    function dateStr(v) { return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+    function timeStr(v) { return v is string && (v == '' || v.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')); }
+
+    function taskFields() {
+      return ['kind', 'title', 'memo', 'start', 'end', 'time', 'toCompany', 'assignee', 'fromName', 'fromCompany',
+              'status', 'doneAt', 'doneBy', 'attachmentCount', 'createdAt', 'updatedAt', 'updatedBy'];
+    }
+
+    function validTask(d) {
+      return d.keys().hasOnly(taskFields()) && d.keys().hasAll(taskFields())
+        && d.kind in ['request', 'event']
+        && nonEmpty(d.title, 120)
+        && str(d.memo, 5000)
+        && dateStr(d.start) && dateStr(d.end) && d.start <= d.end
+        && timeStr(d.time)
+        && ((d.kind == 'request' && nonEmpty(d.toCompany, 40)) || (d.kind == 'event' && str(d.toCompany, 40)))
+        && str(d.assignee, 40)
+        && nonEmpty(d.fromName, 40)
+        && nonEmpty(d.fromCompany, 40)
+        && d.status in ['open', 'done']
+        && ((d.status == 'done' && d.doneAt is timestamp) || (d.status == 'open' && d.doneAt == null))
+        && str(d.doneBy, 40)
+        && d.attachmentCount is int && d.attachmentCount >= 0 && d.attachmentCount <= 10
+        && d.createdAt is timestamp
+        && d.updatedAt == request.time
+        && nonEmpty(d.updatedBy, 40);
+    }
+
+    function fileFields() { return ['kind', 'name', 'type', 'size', 'storedSize', 'encoding', 'uploadedBy', 'createdAt']; }
+    function linkFields() { return ['kind', 'name', 'url', 'uploadedBy', 'createdAt']; }
+
+    function validAttachment(d) {
+      return nonEmpty(d.uploadedBy, 40) && d.createdAt == request.time
+        && (
+          (d.kind == 'file'
+            && d.keys().hasOnly(fileFields()) && d.keys().hasAll(fileFields())
+            && nonEmpty(d.name, 200) && str(d.type, 100)
+            && d.size is int && d.size >= 1 && d.size <= 20971520
+            && d.storedSize is int && d.storedSize >= 1 && d.storedSize <= 716800
+            && d.encoding in ['gzip', 'none'])
+          ||
+          (d.kind == 'link'
+            && d.keys().hasOnly(linkFields()) && d.keys().hasAll(linkFields())
+            && str(d.name, 200)
+            && d.url is string && d.url.size() <= 2000 && d.url.matches('^https?://.+'))
+        );
+    }
+
+    match /rooms/{key} {
+      allow read: if validKey(key);
+      allow create: if validKey(key)
+        && request.resource.data.keys().hasOnly(['name', 'createdAt'])
+        && request.resource.data.keys().hasAll(['name', 'createdAt'])
+        && nonEmpty(request.resource.data.name, 60)
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+
+      match /tasks/{taskId} {
+        allow read: if validKey(key);
+        allow create: if validKey(key) && validTask(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+        allow update: if validKey(key) && validTask(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if validKey(key);
+
+        match /attachments/{attId} {
+          allow read: if validKey(key);
+          allow create: if validKey(key) && validAttachment(request.resource.data);
+          allow update: if false;
+          allow delete: if validKey(key);
+
+          match /blob/{blobId} {
+            allow read: if validKey(key);
+            allow create: if validKey(key) && blobId == 'data'
+              && request.resource.data.keys().hasOnly(['data'])
+              && request.resource.data.keys().hasAll(['data'])
+              && nonEmpty(request.resource.data.data, 960000);
+            allow update: if false;
+            allow delete: if validKey(key);
+          }
+        }
+      }
+    }
+  }
+}
+```
+(이전 파일 끝의 `match /{document=**} { allow read, write: if false; }`는 효력이 없는 문장이므로 뺀다.)
+
+- [ ] **Step 9: 규칙 배포**
+
+Run: `npx firebase-tools@15 deploy --only firestore:rules --non-interactive 2>&1 | grep -v EBADENGINE | tail -5`
+Expected: `✔ Deploy complete!`. 컴파일 오류가 나오면 줄 번호를 보고 `firestore.rules`를 고친 뒤 재실행.
+
+- [ ] **Step 10: 규칙 테스트 (전면 교체) + 실행**
+
+`test/rules.test.mjs`:
+```js
+// 실제 Firebase 프로젝트에 붙어 firestore.rules의 허용/거부를 확인한다. 실행: npm run test:rules
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { initializeApp } from 'firebase/app';
+import {
+  getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, query, limit,
+  serverTimestamp, terminate, writeBatch, increment,
+} from 'firebase/firestore';
+import { firebaseConfig } from '../firebase-config.js';
+import { generateKey } from '../src/key.js';
+
+const db = getFirestore(initializeApp(firebaseConfig));
+const key = generateKey();
+const who = { name: '테스트', company: '테스트사' };
+const tasksCol = () => collection(db, 'rooms', key, 'tasks');
+const base = () => ({
+  kind: 'request', title: '규칙 테스트', memo: '', start: '2026-09-14', end: '2026-09-14', time: '',
+  toCompany: 'A사', assignee: '', fromName: who.name, fromCompany: who.company,
+  status: 'open', doneAt: null, doneBy: '', attachmentCount: 0,
+  createdAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: who.name,
+});
+const touch = () => ({ updatedAt: serverTimestamp(), updatedBy: who.name });
+const denied = (p) => assert.rejects(p, (e) => /permission-denied|PERMISSION_DENIED/i.test(`${e.code} ${e.message}`));
+const created = [];
+
+after(async () => {
+  for (const ref of created) await deleteDoc(ref).catch(() => {});
+  await terminate(db);
+});
+
+test('room: create allowed with a valid key; short key, extra field, empty name, delete denied', async () => {
+  await setDoc(doc(db, 'rooms', key), { name: '규칙 테스트', createdAt: serverTimestamp() });
+  assert.equal((await getDoc(doc(db, 'rooms', key))).data().name, '규칙 테스트');
+  await denied(setDoc(doc(db, 'rooms', 'shortkey'), { name: 'x', createdAt: serverTimestamp() }));
+  await denied(setDoc(doc(db, 'rooms', generateKey()), { name: 'x', createdAt: serverTimestamp(), extra: 1 }));
+  await denied(setDoc(doc(db, 'rooms', generateKey()), { name: '', createdAt: serverTimestamp() }));
+  await denied(deleteDoc(doc(db, 'rooms', key)));
+});
+
+test('task: request/event create, 120-char title, time, complete/reopen allowed', async () => {
+  const ref = await addDoc(tasksCol(), base());
+  created.push(ref);
+  const ref2 = await addDoc(tasksCol(), { ...base(), title: '가'.repeat(120), time: '09:30' });
+  created.push(ref2);
+  const ev = await addDoc(tasksCol(), { ...base(), kind: 'event', toCompany: '', time: '14:00', memo: '가'.repeat(5000) });
+  created.push(ev);
+  await updateDoc(ref, { status: 'done', doneAt: serverTimestamp(), doneBy: who.name, ...touch() });
+  assert.equal((await getDoc(ref)).data().status, 'done');
+  await updateDoc(ref, { status: 'open', doneAt: null, doneBy: '', ...touch() });
+  assert.equal((await getDoc(ref)).data().status, 'open');
+});
+
+test('task: invalid documents denied', async () => {
+  await denied(addDoc(tasksCol(), { ...base(), title: '가'.repeat(121) }));
+  await denied(addDoc(tasksCol(), { ...base(), title: '' }));
+  await denied(addDoc(tasksCol(), { ...base(), status: 'wip' }));
+  await denied(addDoc(tasksCol(), { ...base(), end: '2026-09-13' }));
+  await denied(addDoc(tasksCol(), { ...base(), start: '2026/09/14' }));
+  await denied(addDoc(tasksCol(), { ...base(), updatedAt: new Date() }));
+  await denied(addDoc(tasksCol(), { ...base(), hacked: true }));
+  await denied(addDoc(tasksCol(), { ...base(), status: 'done' }));
+  await denied(addDoc(tasksCol(), { ...base(), kind: 'note' }));
+  await denied(addDoc(tasksCol(), { ...base(), toCompany: '' }));
+  await denied(addDoc(tasksCol(), { ...base(), time: '25:00' }));
+  await denied(addDoc(tasksCol(), { ...base(), memo: '가'.repeat(5001) }));
+  await denied(addDoc(tasksCol(), { ...base(), attachmentCount: 11 }));
+  await denied(addDoc(collection(db, 'rooms', 'shortkey', 'tasks'), base()));
+});
+
+test('task: update cannot change createdAt; reading a random room is allowed but empty', async () => {
+  const ref = await addDoc(tasksCol(), base());
+  created.push(ref);
+  await denied(updateDoc(ref, { createdAt: new Date(), ...touch() }));
+  const other = await getDoc(doc(db, 'rooms', generateKey()));
+  assert.equal(other.exists(), false);
+});
+
+test('secrecy: listing the rooms collection is denied (room IDs are the secret keys)', async () => {
+  await denied(getDocs(collection(db, 'rooms')));
+  await denied(getDocs(query(collection(db, 'rooms'), limit(5))));
+});
+
+test('attachments: link and file (with blob) allowed; bad url, oversize, bad encoding, update, count > 10 denied; batch delete works', async () => {
+  const taskRef = await addDoc(tasksCol(), base());
+  created.push(taskRef);
+  const atts = collection(db, 'rooms', key, 'tasks', taskRef.id, 'attachments');
+  const meta = () => ({ name: '촬영구성안', uploadedBy: who.name, createdAt: serverTimestamp() });
+
+  const b1 = writeBatch(db);
+  const linkRef = doc(atts);
+  b1.set(linkRef, { kind: 'link', url: 'https://youtu.be/dQw4w9WgXcQ', ...meta() });
+  b1.update(taskRef, { attachmentCount: increment(1), ...touch() });
+  await b1.commit();
+  assert.equal((await getDoc(taskRef)).data().attachmentCount, 1);
+
+  const b2 = writeBatch(db);
+  const fileRef = doc(atts);
+  b2.set(fileRef, { kind: 'file', type: 'text/html', size: 1234, storedSize: 300, encoding: 'gzip', ...meta() });
+  b2.set(doc(atts, fileRef.id, 'blob', 'data'), { data: 'QUJD'.repeat(75) });
+  b2.update(taskRef, { attachmentCount: increment(1), ...touch() });
+  await b2.commit();
+  assert.equal((await getDocs(atts)).size, 2);
+  assert.equal((await getDoc(doc(atts, fileRef.id, 'blob', 'data'))).data().data.length, 300);
+
+  await denied(setDoc(doc(atts), { kind: 'link', url: 'javascript:alert(1)', ...meta() }));
+  await denied(setDoc(doc(atts), { kind: 'file', type: 'text/html', size: 1, storedSize: 716801, encoding: 'gzip', ...meta() }));
+  await denied(setDoc(doc(atts), { kind: 'file', type: 'text/html', size: 1, storedSize: 1, encoding: 'zip', ...meta() }));
+  await denied(setDoc(doc(atts), { kind: 'file', type: 'text/html', size: 1, storedSize: 1, encoding: 'gzip', data: 'x', ...meta() }));
+  await denied(setDoc(doc(atts, 'nofile', 'blob', 'data'), { data: 'x'.repeat(960001) }));
+  await denied(setDoc(doc(atts, 'nofile', 'blob', 'other'), { data: 'x' }));
+  await denied(updateDoc(linkRef, { name: '바꿈' }));
+  await denied(updateDoc(taskRef, { attachmentCount: 11, ...touch() }));
+
+  const b3 = writeBatch(db);
+  b3.delete(doc(atts, fileRef.id, 'blob', 'data'));
+  b3.delete(fileRef);
+  b3.delete(linkRef);
+  b3.update(taskRef, { attachmentCount: increment(-2), ...touch() });
+  await b3.commit();
+  assert.equal((await getDocs(atts)).size, 0);
+  assert.equal((await getDoc(taskRef)).data().attachmentCount, 0);
+});
+```
+
+Run: `npm run test:rules`
+Expected: 6 pass, 0 fail (5~30초). 전부 permission-denied면 배포 반영 전 → 30초 후 재실행.
+
+- [ ] **Step 11: 문법 검사 + 커밋**
+
+Run: `node --check src/store.js && npm test && echo ALL-OK`
+Expected: 7개 테스트 파일 PASS, `ALL-OK`.
+
+```bash
+git add src/validate.js src/calendar.js src/links.js src/files.js src/store.js firestore.rules package.json test/validate.test.mjs test/calendar.test.mjs test/links.test.mjs test/files.test.mjs test/rules.test.mjs
+git commit -m "feat: v1.1 데이터 계층 — 항목 종류·시간·본문 5,000자·첨부(파일 압축 저장·링크) + 규칙
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
