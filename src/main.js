@@ -157,6 +157,20 @@ async function afterAttachmentChange(taskId) {
   if (!isLive(taskId)) await refreshArchived(taskId);
 }
 
+// 폼에서 고른 첨부를 저장 직후 하나씩 올린다. 일부가 실패해도 항목 저장은 이미 끝났으므로 안내만 한다.
+async function uploadPending(taskId, pending, identity) {
+  if (!pending?.length) return;
+  let failed = 0;
+  for (const p of pending) {
+    try {
+      if (p.kind === 'file') await addFileAttachment(state.key, taskId, p.prepared, identity);
+      else await addLinkAttachment(state.key, taskId, { name: p.name, url: p.url }, identity);
+    } catch (err) { console.error(err); failed += 1; }
+  }
+  if (failed) toast(`첨부 ${pending.length}개 중 ${failed}개를 저장하지 못했습니다.`, 'error');
+  await afterAttachmentChange(taskId);
+}
+
 function openTask(id) {
   const task = findTask(id);
   if (!task) { toast('항목을 찾을 수 없습니다. 새로고침하세요.', 'error'); return; }
@@ -206,8 +220,9 @@ async function handleAction(action, taskId) {
       if (!id) break;
       openTaskForm({
         task: null, date: state.selectedDate ?? today, identity: id, companies: companiesOf(allTasks()),
-        onSubmit: async (v) => {
+        onSubmit: async (v, pending) => {
           const newId = await addTask(state.key, v, id);
+          await uploadPending(newId, pending, id);
           if (v.start < liveFrom()) await refreshArchived(newId);
           toast(v.kind === 'event' ? '일정을 추가했습니다.' : '작업을 요청했습니다.');
         },
@@ -220,9 +235,10 @@ async function handleAction(action, taskId) {
       const id = await requireIdentity();
       if (!id) break;
       openTaskForm({
-        task, date: task.start, identity: id, companies: companiesOf(allTasks()),
-        onSubmit: async (v) => {
+        task, date: task.start, identity: id, companies: companiesOf(allTasks()), existingCount: task.attachmentCount ?? 0,
+        onSubmit: async (v, pending) => {
           await updateTask(state.key, task.id, v, id);
+          await uploadPending(task.id, pending, id);
           if (!isLive(task.id) || v.start < liveFrom()) await refreshArchived(task.id);
           toast('저장했습니다.');
         },

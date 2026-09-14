@@ -1,5 +1,7 @@
 import { esc } from './dom.js';
-import { validateTask, validateIdentity, LIMITS } from '../validate.js';
+import { validateTask, validateIdentity, validateLink, LIMITS } from '../validate.js';
+import { prepareFile } from '../files.js';
+import { hostOf, formatBytes } from '../links.js';
 import { toast } from './toast.js';
 
 const stack = []; // 열린 모달의 close 함수, 마지막이 맨 위
@@ -60,7 +62,19 @@ export function openIdentityForm({ identity, onSave, onCancel }) {
   });
 }
 
-export function openTaskForm({ task, date, identity, companies, onSubmit }) {
+/** 폼에서 고른 첨부 대기 행: { uid, kind: 'file', prepared } | { uid, kind: 'link', name, url } */
+function pendingRowHtml(p) {
+  const isLink = p.kind === 'link';
+  const name = isLink ? (p.name || p.url) : p.prepared.name;
+  const meta = isLink ? hostOf(p.url) : formatBytes(p.prepared.size);
+  return `<li class="form-att-row" data-pending-row="${esc(p.uid)}">
+    <span class="att-icon">${isLink ? '\u{1F517}' : '\u{1F4CE}'}</span>
+    <span class="att-main"><span class="att-name">${esc(name)}</span><span class="att-meta">${esc(meta)}</span></span>
+    <button type="button" class="btn btn-sm btn-ghost btn-danger-text" data-pending-remove="${esc(p.uid)}">제거</button>
+  </li>`;
+}
+
+export function openTaskForm({ task, date, identity, companies, existingCount = 0, onSubmit }) {
   const isEdit = Boolean(task);
   const v = task ?? { kind: 'request', title: '', toCompany: '', assignee: '', start: date, end: date, time: '', memo: '' };
   const { el, close } = openModal(`
@@ -84,7 +98,28 @@ export function openTaskForm({ task, date, identity, companies, onSubmit }) {
       </div>
       <label>본문<textarea name="memo" rows="6" maxlength="${LIMITS.memo}" placeholder="자세한 내용, 준비물, 참고 사항…">${esc(v.memo)}</textarea></label>
       <p class="field-error" data-error-for="memo"></p>
-      <p class="muted">${isEdit ? '수정자' : '작성자'}: ${esc(identity.name)} · ${esc(identity.company)}${isEdit ? '' : ' · 첨부는 저장 후 상세 화면에서 추가합니다.'}</p>
+      <div class="form-atts">
+        <div class="form-atts-head">
+          <h3>첨부 <span class="count" data-form-att-count>${existingCount}</span><span class="muted">/ ${LIMITS.attachmentsPerTask}</span></h3>
+          <div class="form-atts-actions">
+            <button type="button" class="btn btn-sm" id="form-add-file">파일 추가</button>
+            <button type="button" class="btn btn-sm" id="form-add-link">링크 추가</button>
+            <input type="file" id="form-file-input" multiple hidden>
+          </div>
+        </div>
+        <div class="form-link-row" hidden>
+          <input id="form-link-url" placeholder="https:// 주소 (유튜브·구글 드라이브·노션 등)" autocomplete="off">
+          <input id="form-link-name" placeholder="제목 (선택)" maxlength="${LIMITS.attachmentName}" autocomplete="off">
+          <div class="form-link-actions">
+            <button type="button" class="btn btn-sm" id="form-link-cancel">취소</button>
+            <button type="button" class="btn btn-sm btn-primary" id="form-link-add">추가</button>
+          </div>
+        </div>
+        <p class="field-error" data-error-for="link"></p>
+        <ul class="form-att-list"></ul>
+        <p class="hint">${existingCount > 0 ? `이미 붙인 첨부 ${existingCount}개는 상세 화면에서 관리합니다. ` : ''}파일은 압축 후 700KB까지. 큰 파일은 링크로 붙이세요.</p>
+      </div>
+      <p class="muted">${isEdit ? '수정자' : '작성자'}: ${esc(identity.name)} · ${esc(identity.company)}</p>
       <div class="modal-actions">
         <button type="button" class="btn" data-close>취소</button>
         <button type="submit" class="btn btn-primary">${isEdit ? '저장' : '추가'}</button>
@@ -96,6 +131,85 @@ export function openTaskForm({ task, date, identity, companies, onSubmit }) {
     if (e.target.name !== 'kind') return;
     companyLabel.innerHTML = e.target.value === 'event' ? '관련 회사' : '담당 회사 <span class="req">*</span>';
   });
+
+  // ---- 첨부 대기 목록: 저장할 때 한꺼번에 올린다 ----
+  const pending = [];
+  let uid = 0;
+  const attList = el.querySelector('.form-att-list');
+  const countEl = el.querySelector('[data-form-att-count]');
+  const addFileBtn = el.querySelector('#form-add-file');
+  const addLinkBtn = el.querySelector('#form-add-link');
+  const fileInput = el.querySelector('#form-file-input');
+  const linkRow = el.querySelector('.form-link-row');
+  const linkUrl = el.querySelector('#form-link-url');
+  const linkName = el.querySelector('#form-link-name');
+  const linkError = el.querySelector('[data-error-for="link"]');
+
+  function renderPending() {
+    attList.innerHTML = pending.map(pendingRowHtml).join('');
+    countEl.textContent = String(existingCount + pending.length);
+  }
+  function hasRoom() {
+    if (existingCount + pending.length < LIMITS.attachmentsPerTask) return true;
+    toast(`첨부는 ${LIMITS.attachmentsPerTask}개까지입니다.`, 'error');
+    return false;
+  }
+  function closeLinkRow() {
+    linkRow.hidden = true;
+    linkUrl.value = '';
+    linkName.value = '';
+    linkError.textContent = '';
+  }
+  function addLink() {
+    if (!hasRoom()) return;
+    const r = validateLink({ url: linkUrl.value, name: linkName.value });
+    linkError.textContent = r.errors.url || r.errors.name || '';
+    if (!r.ok) return;
+    pending.push({ uid: ++uid, kind: 'link', name: r.value.name || hostOf(r.value.url), url: r.value.url });
+    renderPending();
+    closeLinkRow();
+  }
+
+  addFileBtn.addEventListener('click', () => {
+    if (!hasRoom()) return;
+    fileInput.value = '';
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', async () => {
+    const files = [...fileInput.files];
+    fileInput.value = '';
+    if (!files.length) return;
+    addFileBtn.disabled = true;
+    addFileBtn.textContent = '압축 중…';
+    for (const file of files) {
+      if (!hasRoom()) break;
+      try {
+        pending.push({ uid: ++uid, kind: 'file', prepared: await prepareFile(file) });
+        renderPending();
+      } catch (err) {
+        console.error(err);
+        toast(err?.message?.includes('KB') || err?.message?.includes('MB') ? err.message : '파일을 첨부하지 못했습니다.', 'error');
+      }
+    }
+    addFileBtn.textContent = '파일 추가';
+    addFileBtn.disabled = false;
+  });
+  addLinkBtn.addEventListener('click', () => {
+    if (!hasRoom()) return;
+    linkRow.hidden = false;
+    linkUrl.focus();
+  });
+  el.querySelector('#form-link-cancel').addEventListener('click', closeLinkRow);
+  el.querySelector('#form-link-add').addEventListener('click', addLink);
+  // 폼 안이라 엔터를 그냥 두면 항목이 저장돼 버린다.
+  linkRow.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addLink(); } });
+  attList.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pending-remove]');
+    if (!btn) return;
+    const i = pending.findIndex((p) => String(p.uid) === btn.dataset.pendingRemove);
+    if (i >= 0) { pending.splice(i, 1); renderPending(); }
+  });
+
   form.elements.title.focus();
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -107,13 +221,16 @@ export function openTaskForm({ task, date, identity, companies, onSubmit }) {
     showErrors(form, r.errors);
     if (!r.ok) return;
     const btn = form.querySelector('button[type=submit]');
+    const label = btn.textContent;
     btn.disabled = true;
+    btn.textContent = '저장 중…';
     try {
-      await onSubmit(r.value);
+      await onSubmit(r.value, pending);
       close();
     } catch (err) {
       console.error(err);
       toast('저장하지 못했습니다. 잠시 후 다시 시도하세요.', 'error');
+      btn.textContent = label;
       btn.disabled = false;
     }
   });
