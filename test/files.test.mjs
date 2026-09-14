@@ -8,6 +8,12 @@ test('base64 helpers round-trip binary data', () => {
   assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
 });
 
+test('base64 helpers round-trip 100 KB of random bytes (multi-chunk)', () => {
+  const bytes = new Uint8Array(100000);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
+});
+
 test('gzipBase64 shrinks repetitive text and gunzipBase64 restores it exactly', async () => {
   const text = '<html><body>' + '<p>촬영 구성안 본문 내용</p>'.repeat(4000) + '</body></html>';
   const bytes = new TextEncoder().encode(text);

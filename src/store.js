@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
-  getFirestore, doc, collection, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
+  getFirestore, doc, collection, getDoc, getDocs, setDoc, addDoc, updateDoc,
   query, where, orderBy, onSnapshot, serverTimestamp, writeBatch, increment,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import { generateKey } from './key.js';

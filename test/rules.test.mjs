@@ -3,7 +3,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp } from 'firebase/app';
 import {
-  getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, query, limit,
+  getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, query, limit, collectionGroup,
   serverTimestamp, terminate, writeBatch, increment,
 } from 'firebase/firestore';
 import { firebaseConfig } from '../firebase-config.js';
@@ -110,6 +110,16 @@ test('attachments: link and file (with blob) allowed; bad url, oversize, bad enc
   await denied(setDoc(doc(atts, 'nofile', 'blob', 'other'), { data: 'x' }));
   await denied(updateDoc(linkRef, { name: '바꿈' }));
   await denied(updateDoc(taskRef, { attachmentCount: 11, ...touch() }));
+  await denied(setDoc(doc(atts, 'nofile', 'blob', 'data'), { data: '' }));
+  await denied(getDocs(collectionGroup(db, 'attachments')));
+  await denied(getDocs(collectionGroup(db, 'blob')));
+  // 카운터 상한은 increment 경로에서도 걸려야 한다: 10에서 +1
+  await updateDoc(taskRef, { attachmentCount: 10, ...touch() });
+  const bx = writeBatch(db);
+  bx.set(doc(atts), { kind: 'link', url: 'https://example.com/x', ...meta() });
+  bx.update(taskRef, { attachmentCount: increment(1), ...touch() });
+  await denied(bx.commit());
+  await updateDoc(taskRef, { attachmentCount: 2, ...touch() });
 
   const b3 = writeBatch(db);
   b3.delete(doc(atts, fileRef.id, 'blob', 'data'));

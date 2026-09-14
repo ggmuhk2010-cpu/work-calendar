@@ -44,7 +44,7 @@ export function validateTask(input = {}) {
 }
 
 export function validateLink(input = {}) {
-  const v = { name: trimStr(input.name), url: trimStr(input.url) };
+  const v = { name: trimStr(input.name), url: trimStr(input.url).replace(/^https?:\/\//i, (s) => s.toLowerCase()) };
   const errors = {};
   if (!/^https?:\/\/\S+$/i.test(v.url)) errors.url = 'http:// 또는 https://로 시작하는 주소를 입력하세요.';
   else if (v.url.length > LIMITS.url) errors.url = `주소는 ${LIMITS.url}자 이하여야 합니다.`;

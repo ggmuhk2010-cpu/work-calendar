@@ -42,7 +42,7 @@ service cloud.firestore {
           (d.kind == 'file'
             && d.keys().hasOnly(fileFields()) && d.keys().hasAll(fileFields())
             && nonEmpty(d.name, 200) && str(d.type, 100)
-            && d.size is int && d.size >= 1 && d.size <= 20971520
+            && d.size is int && d.size >= 0 && d.size <= 20971520
             && d.storedSize is int && d.storedSize >= 1 && d.storedSize <= 716800
             && d.encoding in ['gzip', 'none'])
           ||
@@ -76,6 +76,7 @@ service cloud.firestore {
           allow update: if false;
           allow delete: if validKey(key);
 
+          // 내용 문서는 같은 배치에서 메타와 함께 생성되므로 부모 존재를 검사할 수 없다(exists()는 배치 이전 상태를 본다).
           match /blob/{blobId} {
             allow read: if validKey(key);
             allow create: if validKey(key) && blobId == 'data'

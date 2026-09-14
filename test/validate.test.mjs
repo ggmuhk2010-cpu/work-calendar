@@ -58,6 +58,7 @@ test('validateLink', () => {
   assert.ok(validateLink({ name: '', url: '' }).errors.url);
   assert.ok(validateLink({ name: 'a'.repeat(201), url: 'https://x.com' }).errors.name);
   assert.ok(validateLink({ name: '', url: 'https://x.com/' + 'a'.repeat(2000) }).errors.url);
+  assert.equal(validateLink({ name: '', url: 'HTTPS://Example.com/A' }).value.url, 'https://Example.com/A');
 });
 
 test('validateIdentity', () => {
