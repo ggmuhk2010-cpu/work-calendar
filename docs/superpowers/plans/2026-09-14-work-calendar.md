@@ -3007,3 +3007,671 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
 ---
+
+### Task 11: 화면 계층 — 종류 토글·시간·본문, 상세 시트, 첨부(파일·링크·유튜브·HTML 뷰어)
+
+**Files:**
+- Modify: `src/files.js`(브라우저용 두 함수 추가), `src/ui/modals.js`, `src/ui/month.js`, `src/ui/panel.js`, `src/ui/list.js`, `src/ui/topbar.js`, `styles.css`
+- Create: `src/ui/sheet.js`
+- Test: `test/files.test.mjs`에 `prepareFile`/`decodeAttachment` 케이스 추가. 나머지는 `node --check`. 화면 확인은 Task 13.
+
+**Interfaces:**
+- Consumes: Task 10의 `LIMITS`, `KINDS`, `validateTask`(kind/time), `validateLink`, `youtubeId`, `hostOf`, `formatBytes`, `gzipBase64`, `gunzipBase64`, `base64ToBytes`, Task 객체(`kind`, `time`, `attachmentCount`), Attachment 객체 `{id, kind, name, type, size, storedSize, encoding, url, uploadedBy, createdAtMs}`.
+- Produces:
+  - `files.js`: `prepareFile(file: File) → Promise<{name,type,size,storedSize,encoding:'gzip',data}>` (원본 20MB 초과·압축 후 700KB 초과면 `Error`를 throw, 메시지는 한국어 안내문), `decodeAttachment(att, base64) → Promise<Uint8Array>`, `guessType(name, type) → string`.
+  - `modals.js`: 기존 export 유지 + `export function openModal(html, { onClose, className } = {}) → { el, close }` (className은 `.modal`에 추가되는 클래스). `openTaskForm`은 폼에 종류 토글(`name="kind"` 라디오), 시간(`name="time"`), 본문(`name="memo"`)을 가진다.
+  - `sheet.js`: `openDetailSheet({ task, identity, today, handlers })` — `handlers = { onComplete(task), onReopen(task), onEdit(task), onDelete(task), onOpenDate(task), loadAttachments(task) → Promise<Attachment[]>, loadData(task, att) → Promise<string base64>, onAddFile(task, prepared) → Promise, onAddLink(task, {name,url}) → Promise, onDeleteAttachment(task, att) → Promise, requireIdentity() → Promise<identity|null> }`. 완료/완료 취소/수정/삭제/달력에서 보기는 핸들러를 부르고 시트를 닫는다. 첨부 추가·삭제는 핸들러 뒤 목록을 다시 불러온다. `openHtmlViewer({ name, html })`도 export.
+  - 마크업 계약(main.js가 읽음): 카드 제목·행 제목 `data-open-task="<id>"`, 행 날짜 `data-open-date`, 상단 바·패널 버튼 `data-action="add-task"`(이름 `+ 추가`). 나머지 `data-*`는 v1과 같다.
+
+- [ ] **Step 1: `src/files.js`에 브라우저용 함수 추가 + 테스트**
+
+`test/files.test.mjs`에 추가:
+```js
+import { prepareFile, decodeAttachment, guessType } from '../src/files.js';
+
+test('guessType falls back to extension for html/pdf/images', () => {
+  assert.equal(guessType('a.html', ''), 'text/html');
+  assert.equal(guessType('a.HTM', ''), 'text/html');
+  assert.equal(guessType('a.pdf', ''), 'application/pdf');
+  assert.equal(guessType('a.png', 'image/png'), 'image/png');
+  assert.equal(guessType('a.bin', ''), 'application/octet-stream');
+});
+
+test('prepareFile compresses and decodeAttachment restores; oversize rejected', async () => {
+  const html = '<h1>촬영구성안</h1>' + '<p>내용</p>'.repeat(3000);
+  const file = new File([html], '촬영구성안.html', { type: '' });
+  const p = await prepareFile(file);
+  assert.equal(p.name, '촬영구성안.html');
+  assert.equal(p.type, 'text/html');
+  assert.equal(p.encoding, 'gzip');
+  assert.equal(p.size, new TextEncoder().encode(html).length);
+  assert.ok(p.storedSize < p.size);
+  const back = await decodeAttachment({ encoding: 'gzip' }, p.data);
+  assert.equal(new TextDecoder().decode(back), html);
+  const big = new File([new Uint8Array(21 * 1024 * 1024)], 'big.bin');
+  await assert.rejects(prepareFile(big), /20MB/);
+  const noisy = new Uint8Array(900 * 1024);
+  for (let i = 0; i < noisy.length; i++) noisy[i] = (i * 2654435761) >>> 24; // 압축이 안 되는 데이터
+  await assert.rejects(prepareFile(new File([noisy], 'noise.bin')), /700KB/);
+});
+```
+Run: `node --test test/files.test.mjs` → FAIL (`prepareFile` 없음).
+
+`src/files.js`에 추가:
+```js
+const EXT_TYPES = { html: 'text/html', htm: 'text/html', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', txt: 'text/plain', csv: 'text/csv', json: 'application/json', md: 'text/markdown' };
+
+export function guessType(name, type) {
+  if (type) return type;
+  const ext = String(name).toLowerCase().split('.').pop();
+  return EXT_TYPES[ext] ?? 'application/octet-stream';
+}
+
+const MAX_ORIGINAL = 20971520; // 20MB
+const MAX_STORED = 716800;     // 700KB — Firestore 문서 1 MiB 한도 안에서 base64 여유
+
+/** File → Firestore에 넣을 첨부 페이로드. 한도 초과면 한국어 안내문으로 throw. */
+export async function prepareFile(file) {
+  if (file.size > MAX_ORIGINAL) throw new Error('20MB 이하 파일만 올릴 수 있습니다. 큰 파일은 링크로 첨부하세요.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const { data, storedSize } = await gzipBase64(bytes);
+  if (storedSize > MAX_STORED) throw new Error('압축 후 700KB를 넘는 파일입니다. 사진은 줄여서 올리거나, 큰 파일은 링크로 첨부하세요.');
+  return { name: file.name, type: guessType(file.name, file.type), size: bytes.length, storedSize, encoding: 'gzip', data };
+}
+
+export async function decodeAttachment(att, base64) {
+  return att.encoding === 'gzip' ? gunzipBase64(base64) : base64ToBytes(base64);
+}
+```
+Run: `node --test test/files.test.mjs` → PASS.
+
+- [ ] **Step 2: `src/ui/modals.js` — `openModal` export + 폼에 종류·시간·본문**
+
+`openModal`을 `export function openModal(html, { onClose, className } = {})`로 바꾸고, `.modal`에 `className`을 붙인다:
+```js
+root.innerHTML = `<div class="modal-backdrop"><div class="modal ${className ?? ''}" role="dialog" aria-modal="true">${html}</div></div>`;
+```
+`openTaskForm`을 아래로 교체한다(나머지 함수는 그대로):
+```js
+export function openTaskForm({ task, date, identity, companies, onSubmit }) {
+  const isEdit = Boolean(task);
+  const v = task ?? { kind: 'request', title: '', toCompany: '', assignee: '', start: date, end: date, time: '', memo: '' };
+  const { el, close } = openModal(`
+    <h2>${isEdit ? '수정' : '추가'}</h2>
+    <form id="task-form" novalidate>
+      <div class="kind-toggle" role="radiogroup" aria-label="종류">
+        <label class="kind-option"><input type="radio" name="kind" value="request" ${v.kind !== 'event' ? 'checked' : ''}><span>작업 요청</span></label>
+        <label class="kind-option"><input type="radio" name="kind" value="event" ${v.kind === 'event' ? 'checked' : ''}><span>일정</span></label>
+      </div>
+      <label>제목 <span class="req">*</span><input name="title" maxlength="${LIMITS.title}" value="${esc(v.title)}" autocomplete="off"></label>
+      <p class="field-error" data-error-for="title"></p>
+      <label><span data-company-label>${v.kind === 'event' ? '관련 회사' : '담당 회사 <span class="req">*</span>'}</span><input name="toCompany" list="company-list" maxlength="${LIMITS.company}" value="${esc(v.toCompany)}" autocomplete="off"></label>
+      <datalist id="company-list">${companies.map((c) => `<option value="${esc(c)}"></option>`).join('')}</datalist>
+      <p class="field-error" data-error-for="toCompany"></p>
+      <label>담당자<input name="assignee" maxlength="${LIMITS.person}" value="${esc(v.assignee)}" autocomplete="off"></label>
+      <p class="field-error" data-error-for="assignee"></p>
+      <div class="row3">
+        <div><label>시작일 <span class="req">*</span><input type="date" name="start" value="${esc(v.start)}"></label><p class="field-error" data-error-for="start"></p></div>
+        <div><label>마감일<input type="date" name="end" value="${esc(v.end)}"></label><p class="field-error" data-error-for="end"></p></div>
+        <div><label>시간<input type="time" name="time" value="${esc(v.time)}"></label><p class="field-error" data-error-for="time"></p></div>
+      </div>
+      <label>본문<textarea name="memo" rows="6" maxlength="${LIMITS.memo}" placeholder="자세한 내용, 준비물, 참고 사항…">${esc(v.memo)}</textarea></label>
+      <p class="field-error" data-error-for="memo"></p>
+      <p class="muted">${isEdit ? '수정자' : '작성자'}: ${esc(identity.name)} · ${esc(identity.company)}${isEdit ? '' : ' · 첨부는 저장 후 상세 화면에서 추가합니다.'}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>취소</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? '저장' : '추가'}</button>
+      </div>
+    </form>`, { className: 'modal-wide' });
+  const form = el.querySelector('form');
+  const companyLabel = form.querySelector('[data-company-label]');
+  form.addEventListener('change', (e) => {
+    if (e.target.name !== 'kind') return;
+    companyLabel.innerHTML = e.target.value === 'event' ? '관련 회사' : '담당 회사 <span class="req">*</span>';
+  });
+  form.elements.title.focus();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = form.elements;
+    const r = validateTask({
+      kind: f.kind.value, title: f.title.value, toCompany: f.toCompany.value, assignee: f.assignee.value,
+      start: f.start.value, end: f.end.value, time: f.time.value, memo: f.memo.value,
+    });
+    showErrors(form, r.errors);
+    if (!r.ok) return;
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      await onSubmit(r.value);
+      close();
+    } catch (err) {
+      console.error(err);
+      toast('저장하지 못했습니다. 잠시 후 다시 시도하세요.', 'error');
+      btn.disabled = false;
+    }
+  });
+}
+```
+
+- [ ] **Step 3: `src/ui/sheet.js` (신규) — 상세 시트, 첨부, 유튜브, HTML 뷰어**
+
+```js
+import { esc } from './dom.js';
+import { openModal, confirmDialog } from './modals.js';
+import { toast } from './toast.js';
+import { LIMITS, validateLink } from '../validate.js';
+import { youtubeId, hostOf, formatBytes } from '../links.js';
+import { prepareFile, decodeAttachment } from '../files.js';
+import { companyColor } from '../colors.js';
+import { isOverdue } from '../calendar.js';
+
+const SAVE_FAIL = '저장하지 못했습니다. 잠시 후 다시 시도하세요.';
+
+function kindBadge(task) {
+  if (task.kind === 'event') return '<span class="badge badge-event">일정</span>';
+  return task.status === 'done' ? '<span class="badge badge-done">완료</span>' : '<span class="badge badge-open">요청됨</span>';
+}
+
+function headerHtml(task, today) {
+  const c = task.toCompany ? companyColor(task.toCompany) : null;
+  const period = (task.start === task.end ? task.start : `${task.start} ~ ${task.end}`) + (task.time ? ` ${task.time}` : '');
+  const overdue = isOverdue(task, today);
+  return `
+    <div class="sheet-head">
+      <div class="card-head">
+        ${c ? `<span class="tag" style="--chip-bg:${c.bg};--chip-fg:${c.fg}">${esc(task.toCompany)}</span>` : '<span class="tag tag-none">회사 없음</span>'}
+        ${kindBadge(task)}
+      </div>
+      <h2 class="sheet-title ${task.status === 'done' ? 'done' : ''}">${esc(task.title)}</h2>
+      <dl class="card-meta">
+        ${task.assignee ? `<div><dt>담당자</dt><dd>${esc(task.assignee)}</dd></div>` : ''}
+        <div><dt>${task.kind === 'event' ? '작성' : '요청'}</dt><dd>${esc(task.fromName)} · ${esc(task.fromCompany)}</dd></div>
+        <div><dt>일시</dt><dd class="${overdue ? 'overdue' : ''}">${esc(period)}${overdue ? ' (마감 지남)' : ''}</dd></div>
+        ${task.status === 'done' && task.doneBy ? `<div><dt>완료</dt><dd>${esc(task.doneBy)}</dd></div>` : ''}
+      </dl>
+    </div>
+    ${task.memo ? `<section class="sheet-body">${esc(task.memo)}</section>` : '<p class="hint">본문이 없습니다. 수정에서 추가할 수 있습니다.</p>'}`;
+}
+
+function attachmentRowHtml(att) {
+  const isLink = att.kind === 'link';
+  const yt = isLink ? youtubeId(att.url) : null;
+  const isImage = !isLink && att.type.startsWith('image/');
+  const isHtml = !isLink && att.type === 'text/html';
+  const icon = isLink ? (yt ? '▶️' : '🔗') : isImage ? '🖼️' : isHtml ? '📄' : '📎';
+  const meta = isLink ? esc(hostOf(att.url)) : `${formatBytes(att.size)}`;
+  const actions = isLink
+    ? (yt ? `<button class="btn btn-sm" data-att-action="play" data-att="${esc(att.id)}">재생</button>` : '')
+      + `<a class="btn btn-sm" href="${esc(att.url)}" target="_blank" rel="noopener noreferrer">열기</a>`
+    : (isImage ? `<button class="btn btn-sm" data-att-action="preview" data-att="${esc(att.id)}">보기</button>` : '')
+      + (isHtml ? `<button class="btn btn-sm btn-primary" data-att-action="view-html" data-att="${esc(att.id)}">열기</button>` : '')
+      + `<button class="btn btn-sm" data-att-action="download" data-att="${esc(att.id)}">다운로드</button>`;
+  return `<li class="att-row" data-att-row="${esc(att.id)}">
+    <span class="att-icon">${icon}</span>
+    <span class="att-main"><span class="att-name">${esc(att.name || (isLink ? att.url : '파일'))}</span><span class="att-meta">${meta} · ${esc(att.uploadedBy)}</span></span>
+    <span class="att-actions">${actions}<button class="btn btn-sm btn-ghost btn-danger-text" data-att-action="delete" data-att="${esc(att.id)}">삭제</button></span>
+    <div class="att-extra" hidden></div>
+  </li>`;
+}
+
+function downloadBytes(bytes, name, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+export function openHtmlViewer({ name, html }) {
+  const { el } = openModal(`
+    <div class="viewer-head"><h2>${esc(name)}</h2><div><button class="btn btn-sm" id="viewer-newtab">새 창에서 열기</button><button class="btn btn-sm" data-close>닫기</button></div></div>
+    <iframe class="viewer-frame" sandbox="allow-scripts allow-popups allow-forms" title="${esc(name)}"></iframe>`, { className: 'modal-viewer' });
+  el.querySelector('.viewer-frame').srcdoc = html;
+  el.querySelector('#viewer-newtab').addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+}
+
+export function openDetailSheet({ task, identity, today, handlers }) {
+  const isEvent = task.kind === 'event';
+  const { el, close } = openModal(`
+    <div class="grabber" aria-hidden="true"></div>
+    ${headerHtml(task, today)}
+    <section class="sheet-atts">
+      <div class="sheet-atts-head">
+        <h3>첨부 <span class="count" data-att-count>${task.attachmentCount}</span><span class="muted">/ ${LIMITS.attachmentsPerTask}</span></h3>
+        <div class="sheet-atts-actions">
+          <button class="btn btn-sm" id="att-add-file">파일 추가</button>
+          <button class="btn btn-sm" id="att-add-link">링크 추가</button>
+          <input type="file" id="att-file-input" hidden>
+        </div>
+      </div>
+      <form id="att-link-form" class="att-link-form" hidden novalidate>
+        <input name="url" placeholder="https:// 주소 (유튜브·구글 드라이브·노션 등)" autocomplete="off">
+        <input name="name" placeholder="제목 (선택)" maxlength="${LIMITS.attachmentName}" autocomplete="off">
+        <p class="field-error" data-error-for="url"></p>
+        <div class="modal-actions"><button type="button" class="btn btn-sm" id="att-link-cancel">취소</button><button type="submit" class="btn btn-sm btn-primary">추가</button></div>
+      </form>
+      <ul class="att-list"><li class="hint">첨부 불러오는 중…</li></ul>
+      <p class="hint">파일은 압축 후 700KB까지(HTML·문서류는 원본 수 MB 가능, 사진은 작게). 큰 파일은 링크로 붙이세요.</p>
+    </section>
+    <div class="modal-actions sheet-actions">
+      <button class="btn btn-ghost" data-action-sheet="open-date">달력에서 보기</button>
+      <button class="btn btn-ghost btn-danger-text" data-action-sheet="delete">삭제</button>
+      <button class="btn" data-action-sheet="edit">수정</button>
+      ${isEvent ? '' : (task.status === 'done'
+        ? '<button class="btn" data-action-sheet="reopen">완료 취소</button>'
+        : '<button class="btn btn-primary btn-complete" data-action-sheet="complete">완료</button>')}
+      <button class="btn" data-close>닫기</button>
+    </div>`, { className: 'modal-wide modal-sheet' });
+
+  const list = el.querySelector('.att-list');
+  const countEl = el.querySelector('[data-att-count]');
+  let attachments = [];
+  const dataCache = new Map();
+
+  async function reload() {
+    try {
+      attachments = await handlers.loadAttachments(task);
+      countEl.textContent = String(attachments.length);
+      list.innerHTML = attachments.length ? attachments.map(attachmentRowHtml).join('') : '<li class="hint">첨부가 없습니다.</li>';
+    } catch (err) {
+      console.error(err);
+      list.innerHTML = '<li class="hint">첨부를 불러오지 못했습니다.</li>';
+    }
+  }
+  async function bytesOf(att) {
+    if (!dataCache.has(att.id)) dataCache.set(att.id, await decodeAttachment(att, await handlers.loadData(task, att)));
+    return dataCache.get(att.id);
+  }
+  function findAtt(id) { return attachments.find((a) => a.id === id) ?? null; }
+
+  el.addEventListener('click', async (e) => {
+    const sheetBtn = e.target.closest('[data-action-sheet]');
+    if (sheetBtn) {
+      const action = sheetBtn.dataset.actionSheet;
+      close();
+      if (action === 'complete') await handlers.onComplete(task);
+      else if (action === 'reopen') await handlers.onReopen(task);
+      else if (action === 'edit') await handlers.onEdit(task);
+      else if (action === 'delete') await handlers.onDelete(task);
+      else if (action === 'open-date') await handlers.onOpenDate(task);
+      return;
+    }
+    const attBtn = e.target.closest('[data-att-action]');
+    if (!attBtn) return;
+    const att = findAtt(attBtn.dataset.att);
+    if (!att) return;
+    const row = attBtn.closest('[data-att-row]');
+    const extra = row.querySelector('.att-extra');
+    try {
+      switch (attBtn.dataset.attAction) {
+        case 'play': {
+          const id = youtubeId(att.url);
+          extra.hidden = !extra.hidden;
+          extra.innerHTML = extra.hidden ? '' : `<div class="player"><iframe src="https://www.youtube-nocookie.com/embed/${esc(id)}" title="${esc(att.name)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`;
+          break;
+        }
+        case 'preview': {
+          if (!extra.hidden) { extra.hidden = true; extra.innerHTML = ''; break; }
+          attBtn.disabled = true;
+          const bytes = await bytesOf(att);
+          const url = URL.createObjectURL(new Blob([bytes], { type: att.type }));
+          extra.innerHTML = `<img class="att-image" src="${url}" alt="${esc(att.name)}">`;
+          extra.hidden = false;
+          attBtn.disabled = false;
+          break;
+        }
+        case 'view-html': {
+          attBtn.disabled = true;
+          const bytes = await bytesOf(att);
+          attBtn.disabled = false;
+          openHtmlViewer({ name: att.name, html: new TextDecoder().decode(bytes) });
+          break;
+        }
+        case 'download': {
+          attBtn.disabled = true;
+          downloadBytes(await bytesOf(att), att.name, att.type);
+          attBtn.disabled = false;
+          break;
+        }
+        case 'delete': {
+          if (!(await handlers.requireIdentity())) break;
+          if (!(await confirmDialog(`"${att.name || att.url}" 첨부를 삭제할까요?`))) break;
+          await handlers.onDeleteAttachment(task, att);
+          dataCache.delete(att.id);
+          toast('첨부를 삭제했습니다.');
+          await reload();
+          break;
+        }
+        default: break;
+      }
+    } catch (err) {
+      console.error(err);
+      attBtn.disabled = false;
+      toast(err?.message?.includes('KB') || err?.message?.includes('MB') ? err.message : '첨부를 처리하지 못했습니다.', 'error');
+    }
+  });
+
+  const fileInput = el.querySelector('#att-file-input');
+  el.querySelector('#att-add-file').addEventListener('click', async () => {
+    if (attachments.length >= LIMITS.attachmentsPerTask) { toast(`첨부는 ${LIMITS.attachmentsPerTask}개까지입니다.`, 'error'); return; }
+    if (!(await handlers.requireIdentity())) return;
+    fileInput.value = '';
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const btn = el.querySelector('#att-add-file');
+    btn.disabled = true;
+    try {
+      const prepared = await prepareFile(file);
+      await handlers.onAddFile(task, prepared);
+      toast('파일을 첨부했습니다.');
+      await reload();
+    } catch (err) {
+      console.error(err);
+      toast(err?.message?.includes('KB') || err?.message?.includes('MB') ? err.message : SAVE_FAIL, 'error');
+    } finally { btn.disabled = false; }
+  });
+
+  const linkForm = el.querySelector('#att-link-form');
+  el.querySelector('#att-add-link').addEventListener('click', async () => {
+    if (attachments.length >= LIMITS.attachmentsPerTask) { toast(`첨부는 ${LIMITS.attachmentsPerTask}개까지입니다.`, 'error'); return; }
+    if (!(await handlers.requireIdentity())) return;
+    linkForm.hidden = false;
+    linkForm.elements.url.focus();
+  });
+  el.querySelector('#att-link-cancel').addEventListener('click', () => { linkForm.hidden = true; linkForm.reset(); });
+  linkForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = validateLink({ url: linkForm.elements.url.value, name: linkForm.elements.name.value });
+    linkForm.querySelector('[data-error-for="url"]').textContent = r.errors.url || r.errors.name || '';
+    if (!r.ok) return;
+    const btn = linkForm.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      await handlers.onAddLink(task, { url: r.value.url, name: r.value.name || hostOf(r.value.url) });
+      linkForm.hidden = true; linkForm.reset();
+      toast('링크를 첨부했습니다.');
+      await reload();
+    } catch (err) { console.error(err); toast(SAVE_FAIL, 'error'); }
+    finally { btn.disabled = false; }
+  });
+
+  reload();
+  return { close };
+}
+```
+
+- [ ] **Step 4: `src/ui/month.js` — 칩에 시간·종류 반영**
+
+`chipHtml`을 아래로 교체한다:
+```js
+function chipHtml(task, date) {
+  const c = task.toCompany ? companyColor(task.toCompany) : { bg: 'rgba(120, 120, 128, 0.12)', fg: '#3A3A3C' };
+  const cont = task.start !== date ? '<span class="chip-cont">↔</span>' : '';
+  const done = task.kind !== 'event' && task.status === 'done';
+  const time = task.time ? `<span class="chip-time">${esc(task.time)}</span>` : '';
+  return `<button class="chip ${task.kind === 'event' ? 'chip-event' : ''} ${done ? 'chip-done' : ''}" data-task="${esc(task.id)}" data-date="${esc(date)}"
+    style="--chip-bg:${c.bg};--chip-fg:${c.fg}" title="${esc(task.title)}${task.toCompany ? ' · ' + esc(task.toCompany) : ''}">${cont}${done ? '✓ ' : ''}${time}${esc(task.title)}</button>`;
+}
+```
+
+- [ ] **Step 5: `src/ui/panel.js` — 카드: 제목 클릭으로 상세, 종류 배지, 시간, 첨부 수**
+
+`taskCardHtml`을 아래로 교체한다(`renderPanel`의 `+ 작업 요청` 버튼 텍스트는 `+ 추가`로):
+```js
+export function taskCardHtml(task, today) {
+  const c = task.toCompany ? companyColor(task.toCompany) : null;
+  const isEvent = task.kind === 'event';
+  const done = !isEvent && task.status === 'done';
+  const overdue = isOverdue(task, today);
+  const period = (task.start === task.end ? task.start : `${task.start} ~ ${task.end}`) + (task.time ? ` ${task.time}` : '');
+  const badge = isEvent ? '<span class="badge badge-event">일정</span>'
+    : `<span class="badge ${done ? 'badge-done' : 'badge-open'}">${done ? '완료' : '요청됨'}</span>`;
+  return `<article class="card ${done ? 'card-done' : ''}" data-task-card="${esc(task.id)}">
+    <div class="card-head">
+      ${c ? `<span class="tag" style="--chip-bg:${c.bg};--chip-fg:${c.fg}">${esc(task.toCompany)}</span>` : '<span class="tag tag-none">회사 없음</span>'}
+      ${badge}
+    </div>
+    <button class="card-title" data-open-task="${esc(task.id)}">${esc(task.title)}${task.attachmentCount > 0 ? ` <span class="att-count">📎${task.attachmentCount}</span>` : ''}</button>
+    <dl class="card-meta">
+      ${task.assignee ? `<div><dt>담당자</dt><dd>${esc(task.assignee)}</dd></div>` : ''}
+      <div><dt>${isEvent ? '작성' : '요청'}</dt><dd>${esc(task.fromName)} · ${esc(task.fromCompany)}</dd></div>
+      <div><dt>일시</dt><dd class="${overdue ? 'overdue' : ''}">${esc(period)}${overdue ? ' (마감 지남)' : ''}</dd></div>
+      ${done && task.doneBy ? `<div><dt>완료</dt><dd>${esc(task.doneBy)}</dd></div>` : ''}
+    </dl>
+    ${task.memo ? `<p class="card-memo">${esc(task.memo.length > 160 ? task.memo.slice(0, 160) + '…' : task.memo)}</p>` : ''}
+    <div class="card-actions">
+      ${isEvent ? '' : (done
+        ? `<button class="btn" data-action="reopen" data-task="${esc(task.id)}">완료 취소</button>`
+        : `<button class="btn btn-primary btn-complete" data-action="complete" data-task="${esc(task.id)}">완료</button>`)}
+      <button class="btn btn-ghost" data-open-task="${esc(task.id)}">자세히</button>
+    </div>
+  </article>`;
+}
+```
+
+- [ ] **Step 6: `src/ui/list.js` — 행 제목은 상세, 날짜는 달력 이동, 일정 섹션**
+
+`rowHtml`과 `renderList`를 아래로 교체한다(`sectionHtml`은 그대로):
+```js
+function rowHtml(task, today) {
+  const c = task.toCompany ? companyColor(task.toCompany) : null;
+  const isEvent = task.kind === 'event';
+  const done = !isEvent && task.status === 'done';
+  return `<div class="row ${done ? 'row-done' : ''}" data-task-row="${esc(task.id)}">
+    <button class="row-date ${isOverdue(task, today) ? 'overdue' : ''}" data-open-date="${esc(task.start)}" title="달력에서 보기">${esc(isEvent ? task.start : task.end)}${task.time ? `<span class="row-time">${esc(task.time)}</span>` : ''}</button>
+    <button class="row-title" data-open-task="${esc(task.id)}">${esc(task.title)}${task.attachmentCount > 0 ? ` <span class="att-count">📎${task.attachmentCount}</span>` : ''}</button>
+    ${c ? `<span class="tag" style="--chip-bg:${c.bg};--chip-fg:${c.fg}">${esc(task.toCompany)}</span>` : '<span class="tag tag-none">-</span>'}
+    <span class="row-people">${esc(task.assignee || '-')} · ${esc(task.fromName)}(${esc(task.fromCompany)})</span>
+    ${isEvent ? '<span></span>' : (done
+      ? `<button class="btn btn-sm" data-action="reopen" data-task="${esc(task.id)}">완료 취소</button>`
+      : `<button class="btn btn-sm btn-primary btn-complete" data-action="complete" data-task="${esc(task.id)}">완료</button>`)}
+  </div>`;
+}
+
+export function renderList(root, { tasks, today, identity, companies, filter, showDone }) {
+  const g = groupForList(tasks, today, identity?.company ?? null);
+  root.innerHTML = `<section class="list">
+    ${companyFilterHtml(companies, filter)}
+    ${identity
+      ? sectionHtml(`${identity.company}에 온 요청`, g.mine, today, { open: true, emptyText: '우리 회사에 온 미완료 요청이 없습니다.' })
+      : '<p class="hint">이름과 회사를 입력하면 우리 회사에 온 요청을 따로 보여 줍니다.</p>'}
+    ${sectionHtml('전체 미완료', g.others, today, { open: true, emptyText: '미완료 작업이 없습니다.' })}
+    ${sectionHtml('다가오는 일정 (30일)', g.events, today, { open: true, emptyText: '30일 안에 잡힌 일정이 없습니다.' })}
+    ${sectionHtml('최근 완료 (30일)', g.recentDone, today, { open: showDone, emptyText: '최근 완료한 작업이 없습니다.', section: 'done' })}
+  </section>`;
+}
+```
+
+- [ ] **Step 7: `src/ui/topbar.js` — 버튼 이름**
+
+`+ 작업 요청` → `+ 추가` (data-action은 `add-task` 그대로).
+
+- [ ] **Step 8: `styles.css` 추가 (파일 끝, 모바일 블록 앞에 두지 말고 끝에 붙인 뒤 모바일 규칙은 기존 `@media (max-width: 800px)` 블록 안에 추가)**
+
+파일 끝에 추가:
+```css
+/* v1.1: 종류 토글 */
+.kind-toggle { display: flex; gap: 2px; background: var(--fill); padding: 2px; border-radius: var(--r-pill); margin-top: 4px; }
+.kind-option { flex: 1; margin: 0; }
+.kind-option input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.kind-option span { display: block; text-align: center; min-height: 32px; line-height: 32px; border-radius: var(--r-pill); font-weight: 600; font-size: 14px; color: var(--label); cursor: pointer; }
+.kind-option input:checked + span { background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.badge-event { background: rgba(88, 86, 214, .14); color: #4341A8; }
+.tag-none { background: var(--fill); color: var(--label-2); }
+.chip-event { background: transparent; box-shadow: inset 0 0 0 1.5px var(--chip-fg); }
+.chip-time { font-weight: 700; margin-right: 4px; opacity: .85; }
+.att-count { font-size: 12px; color: var(--label-2); font-weight: 600; }
+.card-title { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 0; font-size: 17px; font-weight: 600; margin-bottom: 6px; overflow-wrap: anywhere; cursor: pointer; color: var(--label); }
+.card-title:hover { color: var(--tint); }
+.row-date { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; display: flex; flex-direction: column; line-height: 1.2; }
+.row-date:hover { text-decoration: underline; }
+.row-time { font-size: 12px; color: var(--label-2); }
+
+/* v1.1: 상세 시트 */
+.modal-wide { max-width: 640px; }
+.modal-sheet { padding: 12px 22px 20px; }
+.modal-sheet .grabber { display: block; margin: 0 auto 8px; }
+.sheet-head { margin-bottom: 8px; }
+.sheet-title { font-size: 22px; letter-spacing: -0.02em; margin: 8px 0 10px; overflow-wrap: anywhere; }
+.sheet-title.done { text-decoration: line-through; color: var(--label-2); }
+.sheet-body { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: var(--r-row); padding: 12px 14px; margin: 12px 0; font-size: 15px; line-height: 1.55; }
+.sheet-atts { margin-top: 14px; border-top: .5px solid var(--separator); padding-top: 12px; }
+.sheet-atts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sheet-atts-head h3 { font-size: 15px; }
+.sheet-atts-actions { display: flex; gap: 6px; }
+.att-link-form { background: var(--bg); border-radius: var(--r-row); padding: 4px 12px 10px; margin-top: 10px; }
+.att-link-form input { font-size: 15px; }
+.att-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.att-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; background: var(--bg); border-radius: var(--r-row); padding: 8px 12px; }
+.att-icon { font-size: 18px; }
+.att-main { display: flex; flex-direction: column; min-width: 0; }
+.att-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-meta { font-size: 12px; color: var(--label-2); }
+.att-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.att-actions .btn { text-decoration: none; }
+.att-extra { grid-column: 1 / -1; }
+.att-image { max-width: 100%; border-radius: 10px; display: block; }
+.player { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
+.player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.sheet-actions { flex-wrap: wrap; }
+
+/* v1.1: HTML 뷰어 */
+.modal-viewer { max-width: 96vw; width: 96vw; height: 92vh; max-height: 92vh; padding: 12px 14px; display: flex; flex-direction: column; }
+.viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.viewer-head h2 { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-head div { display: flex; gap: 6px; flex-shrink: 0; }
+.viewer-frame { flex: 1; width: 100%; border: 0; border-radius: 12px; background: #fff; }
+```
+기존 `@media (max-width: 800px)` 블록 안에 추가:
+```css
+  .row3 { grid-template-columns: 1fr 1fr; }
+  .att-row { grid-template-columns: auto minmax(0, 1fr); }
+  .att-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .modal-viewer { width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; }
+```
+
+- [ ] **Step 9: 검사 + 커밋**
+
+Run: `for f in src/files.js src/ui/*.js; do node --check "$f" || echo "FAIL $f"; done; echo done && npm test`
+Expected: `done`만, 7개 테스트 파일 PASS.
+
+```bash
+git add src/files.js test/files.test.mjs src/ui/modals.js src/ui/sheet.js src/ui/month.js src/ui/panel.js src/ui/list.js src/ui/topbar.js styles.css
+git commit -m "feat: v1.1 화면 — 종류 토글·시간·본문, 상세 시트, 첨부(파일·링크·유튜브 재생·HTML 뷰어)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 12: 진입점 연결 — 상세 시트·첨부 핸들러 (`src/main.js`)
+
+**Files:**
+- Modify: `src/main.js`
+- Test: `node --check src/main.js` + `npm test`. 화면 확인은 Task 13.
+
+**Interfaces:**
+- Consumes: `store.js`의 `listAttachments, getAttachmentData, addFileAttachment, addLinkAttachment, deleteAttachment`(Task 10), `openDetailSheet`(Task 11 `src/ui/sheet.js`), 마크업 `data-open-task`(Task 11). 기존 `requireIdentity`, `handleAction`, `isLive`, `refreshArchived`, `ensureArchive`, `render`, `findTask`는 현재 `main.js`에 있다 — 파일을 먼저 읽고 그 이름을 그대로 쓴다.
+
+- [ ] **Step 1: import 추가**
+
+```js
+import {
+  initStore, createRoom, getRoom, subscribeTasks, fetchTasksInRange, getTask, addTask, updateTask, setDone, deleteTask,
+  listAttachments, getAttachmentData, addFileAttachment, addLinkAttachment, deleteAttachment,
+} from './store.js';
+import { openDetailSheet } from './ui/sheet.js';
+```
+
+- [ ] **Step 2: 상세 시트 열기 함수 추가 (`handleAction` 정의 앞)**
+
+```js
+// 실시간 창 밖 문서는 첨부 수 변경이 스냅샷으로 오지 않으므로 직접 갱신한다.
+async function afterAttachmentChange(taskId) {
+  if (!isLive(taskId)) await refreshArchived(taskId);
+}
+
+function openTask(id) {
+  const task = findTask(id);
+  if (!task) { toast('항목을 찾을 수 없습니다. 새로고침하세요.', 'error'); return; }
+  openDetailSheet({
+    task,
+    identity: state.identity,
+    today: todayStr(),
+    handlers: {
+      onComplete: (t) => handleAction('complete', t.id),
+      onReopen: (t) => handleAction('reopen', t.id),
+      onEdit: (t) => handleAction('edit', t.id),
+      onDelete: (t) => handleAction('delete', t.id),
+      onOpenDate: (t) => {
+        state.view = 'calendar';
+        state.month = monthOf(t.start);
+        state.selectedDate = t.start;
+        render();
+        ensureArchive(state.month);
+      },
+      loadAttachments: (t) => listAttachments(state.key, t.id),
+      loadData: async (t, att) => {
+        const data = await getAttachmentData(state.key, t.id, att.id);
+        if (data === null) throw new Error('첨부 내용이 없습니다.');
+        return data;
+      },
+      onAddFile: async (t, prepared) => { await addFileAttachment(state.key, t.id, prepared, state.identity); await afterAttachmentChange(t.id); },
+      onAddLink: async (t, link) => { await addLinkAttachment(state.key, t.id, link, state.identity); await afterAttachmentChange(t.id); },
+      onDeleteAttachment: async (t, att) => { await deleteAttachment(state.key, t.id, att, state.identity); await afterAttachmentChange(t.id); },
+      requireIdentity,
+    },
+  });
+}
+```
+
+- [ ] **Step 3: 클릭 위임에 `data-open-task` 분기 추가**
+
+`app.addEventListener('click', …)` 안에서 `[data-action]` 분기 **앞**에 넣는다(카드의 `자세히`는 `data-open-task`만 있고, 행 제목도 마찬가지):
+```js
+  const openTaskBtn = e.target.closest('[data-open-task]');
+  if (openTaskBtn) { openTask(openTaskBtn.dataset.openTask); return; }
+```
+(순서: `data-view` → `data-filter` → `data-open-task` → `data-action` → `data-open-date` → `data-date`.)
+
+- [ ] **Step 4: 검사 + 커밋**
+
+Run: `node --check src/main.js && echo OK && npm test`
+Expected: `OK`, 7개 테스트 파일 PASS.
+
+```bash
+git add src/main.js
+git commit -m "feat: 상세 시트·첨부 핸들러 연결
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 13: 로컬 브라우저 검증 (v1 + v1.1)
+
+Task 8의 Step 1~8을 그대로 수행하되(버튼 이름은 `+ 추가`, 폼 제목은 `추가`), 다음을 추가한다.
+
+- [ ] **Step 9: 일정 종류** — `+ 추가` → 토글 `일정` → 제목 `주간 회의`, 관련 회사 비움, 시간 `10:00`, 시작일 오늘 → `추가`. 기대: 오늘 칸에 테두리형 칩 `10:00 주간 회의`, 패널 카드 배지 `일정`·완료 버튼 없음, `할 일` 탭 `다가오는 일정 (30일)`에 1건. 작업 요청 폼에서 담당 회사를 비우면 `담당 회사을(를) 입력하세요.`가 뜨고, 일정에서는 안 뜬다.
+- [ ] **Step 10: 상세 시트·본문** — 작업 요청 하나에 본문 3줄(줄바꿈 포함) 입력 → 카드 `자세히` → 시트에서 본문이 줄바꿈 그대로, `첨부 0 / 10`. `달력에서 보기`로 닫히며 해당 날짜 선택. 할 일 탭 행 제목 클릭도 시트가 열리는지.
+- [ ] **Step 11: 링크·유튜브** — 시트 `링크 추가` → `https://www.youtube.com/watch?v=dQw4w9WgXcQ` → `추가`. 기대: 행에 ▶️, `재생` 클릭 시 16:9 플레이어 iframe(`youtube-nocookie.com/embed/dQw4w9WgXcQ`)이 펼쳐짐(`read_page`로 iframe src 확인). `https://www.notion.so/abc` 는 🔗 + `열기`(새 탭). 카드·행에 `📎2`.
+- [ ] **Step 12: HTML 파일 첨부와 뷰어** — 파일 선택 대화상자는 자동화할 수 없으므로 `javascript_tool`로 주입한다:
+  ```js
+  const html = '<!doctype html><html><body><h1>촬영구성안 테스트</h1><button onclick="document.body.append(\' 클릭됨\')">탭</button>' + '<p>내용</p>'.repeat(2000) + '</body></html>';
+  const dt = new DataTransfer(); dt.items.add(new File([html], '촬영구성안.html', { type: 'text/html' }));
+  const input = document.querySelector('#att-file-input'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); 'injected';
+  ```
+  기대: 토스트 `파일을 첨부했습니다.`, 행 📄 `촬영구성안.html`, 크기 표시(원본 기준, 수십 KB). `열기` → 뷰어 모달에 iframe(sandbox="allow-scripts allow-popups allow-forms")이 뜨고 `find "촬영구성안 테스트"`로 본문 확인. 뷰어 안 버튼 클릭이 동작(스크립트 허용). `닫기`. `다운로드` 클릭 시 콘솔 에러 0. 21MB 가짜 파일 주입 시 `20MB 이하…` 토스트.
+- [ ] **Step 13: 첨부 삭제·항목 삭제** — 첨부 하나 `삭제` → 확인 → 목록 갱신, 카운트 감소. 항목 자체 `삭제`(시트 안) → 확인 → 달력에서 사라짐. Firestore 콘솔 없이도 `npm run test:rules`가 그대로 통과하는지 한 번 더 실행.
+- [ ] **Step 14: 모바일 재확인** — `resize_window mobile`: 시트가 하단에서 올라오고(그래버 표시), 폼의 `row3`가 2열, 첨부 행이 2단으로 접히며 가로 스크롤 없음. 스크린샷.
+
+### Task 14: GitHub 저장소 + Pages 배포 + 실제 주소 검증
+
+Task 9의 Step 1~7을 그대로 수행한다. README의 사용 설명에 "작업 요청과 일정, 본문, 첨부(파일 700KB·링크·유튜브 재생·HTML 열기)" 한 줄을 넣는다. 실제 주소 검증(Step 6)에 유튜브 재생과 HTML 뷰어 1회씩을 포함한다.
