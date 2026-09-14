@@ -137,10 +137,10 @@ input, textarea { display: block; width: 100%; margin-top: 6px; padding: 11px 12
 input:focus, textarea:focus { outline: 2px solid var(--tint); outline-offset: 0; }
 input::placeholder { color: var(--label-3); }
 .field-error { color: var(--red); font-size: 12px; margin: 4px 0 0; min-height: 14px; }
-.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
 /* 모달: 시트 */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .3); display: grid; place-items: center; z-index: 20; padding: 16px; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.modal-backdrop + .modal-backdrop { background: rgba(0, 0, 0, .15); }
 .modal { background: var(--surface); border-radius: 28px; padding: 22px 22px 20px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: 0 24px 60px rgba(0, 0, 0, .22); }
 .modal h2 { font-size: 22px; letter-spacing: -0.02em; margin-bottom: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -171,6 +171,7 @@ input::placeholder { color: var(--label-3); }
   .month-title { min-width: 0; font-size: 18px; }
   .panel { position: fixed; left: 0; right: 0; bottom: 0; top: auto; max-height: 72vh; border-radius: 24px 24px 0 0; z-index: 10; box-shadow: 0 -12px 40px rgba(0, 0, 0, .18); padding-bottom: env(safe-area-inset-bottom); }
   .grabber { display: block; }
+  .modal-sheet .grabber { display: block; margin: 0 auto 8px; }
   .row { grid-template-columns: 64px minmax(0, 1fr) auto auto; gap: 8px; }
   .row-people { display: none; }
   .btn-sm { min-height: 36px; }
@@ -217,7 +218,6 @@ input::placeholder { color: var(--label-3); }
 /* v1.1: 상세 시트 */
 .modal-wide { max-width: 640px; }
 .modal-sheet { padding: 12px 22px 20px; }
-.modal-sheet .grabber { display: block; margin: 0 auto 8px; }
 .sheet-head { margin-bottom: 8px; }
 .sheet-title { font-size: 22px; letter-spacing: -0.02em; margin: 8px 0 10px; overflow-wrap: anywhere; }
 .sheet-title.done { text-decoration: line-through; color: var(--label-2); }

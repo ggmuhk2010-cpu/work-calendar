@@ -38,8 +38,9 @@ function headerHtml(task, today) {
 function attachmentRowHtml(att) {
   const isLink = att.kind === 'link';
   const yt = isLink ? youtubeId(att.url) : null;
-  const isImage = !isLink && att.type.startsWith('image/');
-  const isHtml = !isLink && att.type === 'text/html';
+  const type = String(att.type || '');
+  const isImage = !isLink && type.startsWith('image/');
+  const isHtml = !isLink && type === 'text/html';
   const icon = isLink ? (yt ? '▶️' : '🔗') : isImage ? '🖼️' : isHtml ? '📄' : '📎';
   const meta = isLink ? esc(hostOf(att.url)) : `${formatBytes(att.size)}`;
   const actions = isLink
@@ -63,16 +64,13 @@ function downloadBytes(bytes, name, type) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-export function openHtmlViewer({ name, html }) {
+export function openHtmlViewer({ name, html, bytes, type }) {
+  // 첨부 HTML은 신뢰할 수 없으므로 allow-same-origin 없는 샌드박스 안에서만 실행한다. 새 창(blob:)으로 열면 앱과 같은 출처가 되므로 제공하지 않는다.
   const { el } = openModal(`
-    <div class="viewer-head"><h2>${esc(name)}</h2><div><button class="btn btn-sm" id="viewer-newtab">새 창에서 열기</button><button class="btn btn-sm" data-close>닫기</button></div></div>
+    <div class="viewer-head"><h2>${esc(name)}</h2><div><button class="btn btn-sm" id="viewer-download">다운로드</button><button class="btn btn-sm" data-close>닫기</button></div></div>
     <iframe class="viewer-frame" sandbox="allow-scripts allow-popups allow-forms" title="${esc(name)}"></iframe>`, { className: 'modal-viewer' });
   el.querySelector('.viewer-frame').srcdoc = html;
-  el.querySelector('#viewer-newtab').addEventListener('click', () => {
-    const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-    window.open(url, '_blank', 'noopener');
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  });
+  el.querySelector('#viewer-download').addEventListener('click', () => downloadBytes(bytes, name, type));
 }
 
 export function openDetailSheet({ task, identity, today, handlers }) {
@@ -82,16 +80,17 @@ export function openDetailSheet({ task, identity, today, handlers }) {
     ${headerHtml(task, today)}
     <section class="sheet-atts">
       <div class="sheet-atts-head">
-        <h3>첨부 <span class="count" data-att-count>${task.attachmentCount}</span><span class="muted">/ ${LIMITS.attachmentsPerTask}</span></h3>
+        <h3>첨부 <span class="count" data-att-count>${task.attachmentCount ?? 0}</span><span class="muted">/ ${LIMITS.attachmentsPerTask}</span></h3>
         <div class="sheet-atts-actions">
-          <button class="btn btn-sm" id="att-add-file">파일 추가</button>
-          <button class="btn btn-sm" id="att-add-link">링크 추가</button>
+          <button class="btn btn-sm" id="att-add-file" disabled>파일 추가</button>
+          <button class="btn btn-sm" id="att-add-link" disabled>링크 추가</button>
           <input type="file" id="att-file-input" hidden>
         </div>
       </div>
       <form id="att-link-form" class="att-link-form" hidden novalidate>
         <input name="url" placeholder="https:// 주소 (유튜브·구글 드라이브·노션 등)" autocomplete="off">
         <input name="name" placeholder="제목 (선택)" maxlength="${LIMITS.attachmentName}" autocomplete="off">
+        <p class="field-error" data-error-for="name"></p>
         <p class="field-error" data-error-for="url"></p>
         <div class="modal-actions"><button type="button" class="btn btn-sm" id="att-link-cancel">취소</button><button type="submit" class="btn btn-sm btn-primary">추가</button></div>
       </form>
@@ -110,14 +109,21 @@ export function openDetailSheet({ task, identity, today, handlers }) {
 
   const list = el.querySelector('.att-list');
   const countEl = el.querySelector('[data-att-count]');
+  const addFileBtn = el.querySelector('#att-add-file');
+  const addLinkBtn = el.querySelector('#att-add-link');
   let attachments = [];
   const dataCache = new Map();
+  const previewUrls = new Map();
+  const closeAll = () => { for (const u of previewUrls.values()) URL.revokeObjectURL(u); previewUrls.clear(); close(); };
 
   async function reload() {
     try {
       attachments = await handlers.loadAttachments(task);
       countEl.textContent = String(attachments.length);
       list.innerHTML = attachments.length ? attachments.map(attachmentRowHtml).join('') : '<li class="hint">첨부가 없습니다.</li>';
+      const atLimit = Math.max(attachments.length, task.attachmentCount ?? 0) >= LIMITS.attachmentsPerTask;
+      addFileBtn.disabled = atLimit;
+      addLinkBtn.disabled = atLimit;
     } catch (err) {
       console.error(err);
       list.innerHTML = '<li class="hint">첨부를 불러오지 못했습니다.</li>';
@@ -133,7 +139,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
     const sheetBtn = e.target.closest('[data-action-sheet]');
     if (sheetBtn) {
       const action = sheetBtn.dataset.actionSheet;
-      close();
+      closeAll();
       if (action === 'complete') await handlers.onComplete(task);
       else if (action === 'reopen') await handlers.onReopen(task);
       else if (action === 'edit') await handlers.onEdit(task);
@@ -156,10 +162,17 @@ export function openDetailSheet({ task, identity, today, handlers }) {
           break;
         }
         case 'preview': {
-          if (!extra.hidden) { extra.hidden = true; extra.innerHTML = ''; break; }
+          const prevUrl = previewUrls.get(att.id);
+          if (!extra.hidden) {
+            extra.hidden = true; extra.innerHTML = '';
+            if (prevUrl) { URL.revokeObjectURL(prevUrl); previewUrls.delete(att.id); }
+            break;
+          }
           attBtn.disabled = true;
           const bytes = await bytesOf(att);
+          if (prevUrl) { URL.revokeObjectURL(prevUrl); previewUrls.delete(att.id); }
           const url = URL.createObjectURL(new Blob([bytes], { type: att.type }));
+          previewUrls.set(att.id, url);
           extra.innerHTML = `<img class="att-image" src="${url}" alt="${esc(att.name)}">`;
           extra.hidden = false;
           attBtn.disabled = false;
@@ -169,7 +182,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
           attBtn.disabled = true;
           const bytes = await bytesOf(att);
           attBtn.disabled = false;
-          openHtmlViewer({ name: att.name, html: new TextDecoder().decode(bytes) });
+          openHtmlViewer({ name: att.name, html: new TextDecoder().decode(bytes), bytes, type: att.type });
           break;
         }
         case 'download': {
@@ -197,7 +210,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   });
 
   const fileInput = el.querySelector('#att-file-input');
-  el.querySelector('#att-add-file').addEventListener('click', async () => {
+  addFileBtn.addEventListener('click', async () => {
     if (attachments.length >= LIMITS.attachmentsPerTask) { toast(`첨부는 ${LIMITS.attachmentsPerTask}개까지입니다.`, 'error'); return; }
     if (!(await handlers.requireIdentity())) return;
     fileInput.value = '';
@@ -206,8 +219,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
     if (!file) return;
-    const btn = el.querySelector('#att-add-file');
-    btn.disabled = true;
+    addFileBtn.disabled = true;
     try {
       const prepared = await prepareFile(file);
       await handlers.onAddFile(task, prepared);
@@ -216,11 +228,12 @@ export function openDetailSheet({ task, identity, today, handlers }) {
     } catch (err) {
       console.error(err);
       toast(err?.message?.includes('KB') || err?.message?.includes('MB') ? err.message : SAVE_FAIL, 'error');
-    } finally { btn.disabled = false; }
+      addFileBtn.disabled = false;
+    }
   });
 
   const linkForm = el.querySelector('#att-link-form');
-  el.querySelector('#att-add-link').addEventListener('click', async () => {
+  addLinkBtn.addEventListener('click', async () => {
     if (attachments.length >= LIMITS.attachmentsPerTask) { toast(`첨부는 ${LIMITS.attachmentsPerTask}개까지입니다.`, 'error'); return; }
     if (!(await handlers.requireIdentity())) return;
     linkForm.hidden = false;
@@ -230,7 +243,8 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   linkForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const r = validateLink({ url: linkForm.elements.url.value, name: linkForm.elements.name.value });
-    linkForm.querySelector('[data-error-for="url"]').textContent = r.errors.url || r.errors.name || '';
+    linkForm.querySelector('[data-error-for="url"]').textContent = r.errors.url || '';
+    linkForm.querySelector('[data-error-for="name"]').textContent = r.errors.name || '';
     if (!r.ok) return;
     const btn = linkForm.querySelector('button[type=submit]');
     btn.disabled = true;
@@ -244,5 +258,5 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   });
 
   reload();
-  return { close };
+  return { close: closeAll };
 }

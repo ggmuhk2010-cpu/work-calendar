@@ -2,27 +2,29 @@ import { esc } from './dom.js';
 import { validateTask, validateIdentity, LIMITS } from '../validate.js';
 import { toast } from './toast.js';
 
-let currentClose = null;
+const stack = []; // 열린 모달의 close 함수, 마지막이 맨 위
 
 export function openModal(html, { onClose, className } = {}) {
-  if (currentClose) currentClose();
   const root = document.getElementById('modal-root');
-  root.innerHTML = `<div class="modal-backdrop"><div class="modal ${className ?? ''}" role="dialog" aria-modal="true">${html}</div></div>`;
-  const backdrop = root.firstElementChild;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal ${className ?? ''}" role="dialog" aria-modal="true">${html}</div>`;
+  root.appendChild(backdrop);
   let closed = false;
   const close = () => {
     if (closed) return;
     closed = true;
-    if (currentClose === close) currentClose = null;
+    const i = stack.indexOf(close);
+    if (i >= 0) stack.splice(i, 1);
     document.removeEventListener('keydown', onKey);
-    if (root.firstElementChild === backdrop) root.innerHTML = '';
+    backdrop.remove();
     onClose?.();
   };
-  currentClose = close;
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const onKey = (e) => { if (e.key === 'Escape' && stack[stack.length - 1] === close) close(); };
   document.addEventListener('keydown', onKey);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+  stack.push(close);
   return { el: backdrop.firstElementChild, close };
 }
 

@@ -46,6 +46,11 @@ test('prepareFile compresses and decodeAttachment restores; oversize rejected', 
   const big = new File([new Uint8Array(21 * 1024 * 1024)], 'big.bin');
   await assert.rejects(prepareFile(big), /20MB/);
   const noisy = new Uint8Array(900 * 1024);
-  for (let i = 0; i < noisy.length; i++) noisy[i] = Math.floor(Math.random() * 256); // 압축이 안 되는 데이터
+  for (let o = 0; o < noisy.length; o += 65536) crypto.getRandomValues(noisy.subarray(o, o + 65536)); // 압축이 안 되는 데이터
   await assert.rejects(prepareFile(new File([noisy], 'noise.bin')), /700KB/);
+});
+
+test('decodeAttachment returns raw bytes for encoding none', async () => {
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  assert.deepEqual(await decodeAttachment({ encoding: 'none' }, bytesToBase64(bytes)), bytes);
 });
