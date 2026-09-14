@@ -151,11 +151,23 @@ work-calendar/
     calendar.js           순수 로직: 월 격자, 날짜 연산, 날짜별 작업 판정, 할 일 탭 그룹화
     validate.js           순수 로직: 작업 폼 검증 (규칙과 동일 기준)
     identity.js           localStorage 이름·회사
-    ui.js                 렌더링(상단 바, 달력, 패널, 할 일 탭, 모달, 토스트)
+    colors.js             순수 로직: 회사 이름 → 색상
+    ui/dom.js             HTML 이스케이프
+    ui/toast.js           토스트
+    ui/landing.js         시작 화면
+    ui/topbar.js          상단 바
+    ui/month.js           월 달력 + 회사 필터 + 작업 칩
+    ui/panel.js           날짜 패널 + 작업 카드
+    ui/list.js            할 일 탭
+    ui/modals.js          신원 폼·작업 폼·초대 링크·삭제 확인
   test/
     calendar.test.mjs     node:test
+    colors.test.mjs       node:test
     validate.test.mjs     node:test
+    key.test.mjs          node:test
+    identity.test.mjs     node:test
     rules.test.mjs        실제 Firestore 프로젝트에 Node로 접속해 규칙 허용·거부를 확인 (이 Mac에 Java가 없어 에뮬레이터는 쓰지 않음)
+  .claude/launch.json    로컬 미리보기 서버
   docs/superpowers/specs/ 이 문서
 ```
 

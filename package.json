@@ -1,0 +1,12 @@
+{
+  "name": "work-calendar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/calendar.test.mjs test/colors.test.mjs test/validate.test.mjs test/key.test.mjs test/identity.test.mjs",
+    "test:rules": "node --test test/rules.test.mjs"
+  },
+  "devDependencies": {
+    "firebase": "^12.19.0"
+  }
+}
