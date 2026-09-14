@@ -1,3 +1,5 @@
+import { LIMITS } from '../validate.js';
+
 export function renderLanding(root, { missing, onCreate }) {
   root.innerHTML = `
     <main class="landing">
@@ -7,7 +9,7 @@ export function renderLanding(root, { missing, onCreate }) {
         ${missing ? '<p class="error-banner">존재하지 않는 캘린더 링크입니다. 링크를 다시 확인하거나 새 캘린더를 만드세요.</p>' : ''}
         <form id="create-form" novalidate>
           <label for="room-name">캘린더 이름</label>
-          <input id="room-name" name="name" maxlength="60" placeholder="예: 빅웨이브 × A사 촬영 프로젝트" autocomplete="off">
+          <input id="room-name" name="name" maxlength="${LIMITS.roomName}" placeholder="예: 빅웨이브 × A사 촬영 프로젝트" autocomplete="off">
           <p class="field-error" data-error-for="name"></p>
           <button type="submit" class="btn btn-primary btn-block">새 캘린더 만들기</button>
         </form>

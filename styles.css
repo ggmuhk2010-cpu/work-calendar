@@ -17,8 +17,9 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Apple SD Gothic Neo", Pretendard, "Malgun Gothic", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--label); font-family: var(--font); font-size: 15px; line-height: 1.4; -webkit-font-smoothing: antialiased; }
+html, body { margin: 0; background: var(--bg); color: var(--label); font-family: var(--font); font-size: 15px; line-height: 1.4; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; }
 button, input, textarea { font: inherit; color: inherit; }
+button, .cell, .chip { touch-action: manipulation; }
 h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
 .muted { color: var(--label-2); }
 .hint { color: var(--label-2); font-size: 13px; }
@@ -43,10 +44,11 @@ h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
 
 /* 상단 바: Liquid Glass 재질 + 세그먼트 컨트롤 */
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; position: sticky; top: 0; z-index: 5; background: var(--glass); -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%); border-bottom: 1px solid var(--separator); }
-.brand { font-weight: 700; font-size: 20px; letter-spacing: -0.02em; }
+.brand { font-weight: 700; font-size: 20px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tabs { display: flex; gap: 2px; background: var(--fill); padding: 2px; border-radius: var(--r-pill); }
 .tab { border: 0; background: transparent; min-height: 32px; padding: 4px 16px; border-radius: var(--r-pill); cursor: pointer; font-weight: 600; font-size: 14px; color: var(--label); }
 .tab.active { background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04); }
+.topbar-left { display: flex; align-items: center; min-width: 0; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .identity-chip { border: 0; background: var(--fill); border-radius: var(--r-pill); min-height: 36px; padding: 6px 14px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--label); }
 .badge { display: inline-block; padding: 3px 9px; border-radius: var(--r-pill); font-size: 12px; font-weight: 600; }
@@ -156,21 +158,36 @@ input::placeholder { color: var(--label-3); }
 
 /* 모바일: 하단 시트 */
 @media (max-width: 800px) {
-  .topbar { flex-wrap: wrap; padding: 8px 12px; }
+  .topbar { flex-wrap: wrap; padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top)); }
   .brand { font-size: 17px; }
   .tabs { order: 3; width: 100%; }
   .tab { flex: 1; }
   .main { padding: 10px; gap: 10px; }
   .main.with-panel { grid-template-columns: 1fr; }
   .calendar { padding: 10px 6px; }
-  .cell { min-height: 68px; padding: 3px 2px; border-radius: 8px; }
+  .cell { min-height: 84px; padding: 3px 2px; border-radius: 8px; }
   .cell-day { width: 24px; height: 24px; font-size: 13px; }
   .chip { font-size: 10px; padding: 1px 5px; }
   .month-title { min-width: 0; font-size: 18px; }
-  .panel { position: fixed; left: 0; right: 0; bottom: 0; top: auto; max-height: 72vh; border-radius: 24px 24px 0 0; z-index: 10; box-shadow: 0 -12px 40px rgba(0, 0, 0, .18); }
+  .panel { position: fixed; left: 0; right: 0; bottom: 0; top: auto; max-height: 72vh; border-radius: 24px 24px 0 0; z-index: 10; box-shadow: 0 -12px 40px rgba(0, 0, 0, .18); padding-bottom: env(safe-area-inset-bottom); }
   .grabber { display: block; }
-  .row { grid-template-columns: 70px minmax(0, 1fr) auto; }
+  .row { grid-template-columns: 64px minmax(0, 1fr) auto auto; gap: 8px; }
   .row-people { display: none; }
+  .btn-sm { min-height: 36px; }
   .modal-backdrop { align-items: end; padding: 0; }
-  .modal { border-radius: 24px 24px 0 0; max-height: 92vh; max-width: none; }
+  .modal { border-radius: 24px 24px 0 0; max-height: 92vh; max-width: none; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+  #toast-root { top: calc(12px + env(safe-area-inset-top)); }
+}
+
+/* 태블릿·좁은 데스크톱 */
+@media (min-width: 801px) and (max-width: 1100px) {
+  .main.with-panel { grid-template-columns: minmax(0, 1fr) 320px; }
+  .cell { min-height: 84px; }
+}
+
+/* 넓은 데스크톱 */
+@media (min-width: 1400px) {
+  .main { max-width: 1440px; }
+  .cell { min-height: 112px; }
+  .main.with-panel { grid-template-columns: minmax(0, 1fr) 420px; }
 }

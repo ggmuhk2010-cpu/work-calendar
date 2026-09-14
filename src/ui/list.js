@@ -13,7 +13,7 @@ function rowHtml(task, today) {
     <span class="row-people">${esc(task.assignee || '-')} · ${esc(task.fromName)}(${esc(task.fromCompany)})</span>
     ${done
       ? `<button class="btn btn-sm" data-action="reopen" data-task="${esc(task.id)}">완료 취소</button>`
-      : `<button class="btn btn-sm btn-primary" data-action="complete" data-task="${esc(task.id)}">완료</button>`}
+      : `<button class="btn btn-sm btn-primary btn-complete" data-action="complete" data-task="${esc(task.id)}">완료</button>`}
   </div>`;
 }
 
