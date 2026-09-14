@@ -2,6 +2,7 @@ import { firebaseConfig } from '../firebase-config.js';
 import {
   initStore, createRoom, getRoom, subscribeTasks, fetchTasksInRange, getTask, addTask, updateTask, setDone, deleteTask,
   listAttachments, getAttachmentData, addFileAttachment, addLinkAttachment, deleteAttachment,
+  subscribeComments, addComment, deleteComment,
 } from './store.js';
 import { openDetailSheet } from './ui/sheet.js';
 import { keyFromHash, hashForKey } from './key.js';
@@ -199,6 +200,10 @@ function openTask(id) {
       onAddFile: async (t, prepared) => { await addFileAttachment(state.key, t.id, prepared, state.identity); await afterAttachmentChange(t.id); },
       onAddLink: async (t, link) => { await addLinkAttachment(state.key, t.id, link, state.identity); await afterAttachmentChange(t.id); },
       onDeleteAttachment: async (t, att) => { await deleteAttachment(state.key, t.id, att, state.identity); await afterAttachmentChange(t.id); },
+      // 댓글 쓰기는 항목 문서의 commentCount도 바꾸므로 첨부와 같은 갱신 경로를 쓴다.
+      subscribeComments: (t, onChange, onError) => subscribeComments(state.key, t.id, onChange, onError),
+      onAddComment: async (t, text) => { await addComment(state.key, t.id, text, state.identity); await afterAttachmentChange(t.id); },
+      onDeleteComment: async (t, commentId) => { await deleteComment(state.key, t.id, commentId, state.identity); await afterAttachmentChange(t.id); },
       requireIdentity,
     },
   });

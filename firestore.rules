@@ -10,7 +10,7 @@ service cloud.firestore {
 
     function taskFields() {
       return ['kind', 'title', 'memo', 'start', 'end', 'time', 'toCompany', 'assignee', 'fromName', 'fromCompany',
-              'status', 'doneAt', 'doneBy', 'attachmentCount', 'createdAt', 'updatedAt', 'updatedBy'];
+              'status', 'doneAt', 'doneBy', 'attachmentCount', 'commentCount', 'createdAt', 'updatedAt', 'updatedBy'];
     }
 
     function validTask(d) {
@@ -28,9 +28,20 @@ service cloud.firestore {
         && ((d.status == 'done' && d.doneAt is timestamp) || (d.status == 'open' && d.doneAt == null))
         && str(d.doneBy, 40)
         && d.attachmentCount is int && d.attachmentCount >= 0 && d.attachmentCount <= 10
+        && d.commentCount is int && d.commentCount >= 0 && d.commentCount <= 10000
         && d.createdAt is timestamp
         && d.updatedAt == request.time
         && nonEmpty(d.updatedBy, 40);
+    }
+
+    function commentFields() { return ['text', 'authorName', 'authorCompany', 'createdAt']; }
+
+    function validComment(d) {
+      return d.keys().hasOnly(commentFields()) && d.keys().hasAll(commentFields())
+        && nonEmpty(d.text, 2000)
+        && nonEmpty(d.authorName, 40)
+        && nonEmpty(d.authorCompany, 40)
+        && d.createdAt == request.time;
     }
 
     function fileFields() { return ['kind', 'name', 'type', 'size', 'storedSize', 'encoding', 'uploadedBy', 'createdAt']; }
@@ -69,6 +80,13 @@ service cloud.firestore {
         allow update: if validKey(key) && validTask(request.resource.data)
           && request.resource.data.createdAt == resource.data.createdAt;
         allow delete: if validKey(key);
+
+        match /comments/{commentId} {
+          allow read: if validKey(key);
+          allow create: if validKey(key) && validComment(request.resource.data);
+          allow update: if false;
+          allow delete: if validKey(key);
+        }
 
         match /attachments/{attId} {
           allow read: if validKey(key);

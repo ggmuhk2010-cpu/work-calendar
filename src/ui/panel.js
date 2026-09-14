@@ -15,7 +15,7 @@ export function taskCardHtml(task, today) {
       ${c ? `<span class="tag" style="--chip-bg:${c.bg};--chip-fg:${c.fg}">${esc(task.toCompany)}</span>` : '<span class="tag tag-none">회사 없음</span>'}
       ${badge}
     </div>
-    <button class="card-title" data-open-task="${esc(task.id)}">${esc(task.title)}${task.attachmentCount > 0 ? ` <span class="att-count">📎${task.attachmentCount}</span>` : ''}</button>
+    <button class="card-title" data-open-task="${esc(task.id)}">${esc(task.title)}${task.attachmentCount > 0 ? ` <span class="att-count">📎${task.attachmentCount}</span>` : ''}${task.commentCount > 0 ? ` <span class="comment-count">💬${task.commentCount}</span>` : ''}</button>
     <dl class="card-meta">
       ${task.assignee ? `<div><dt>담당자</dt><dd>${esc(task.assignee)}</dd></div>` : ''}
       <div><dt>${isEvent ? '작성' : '요청'}</dt><dd>${esc(task.fromName)} · ${esc(task.fromCompany)}</dd></div>

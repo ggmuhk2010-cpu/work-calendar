@@ -16,6 +16,7 @@ const roomRef = (key) => doc(db, 'rooms', key);
 const tasksRef = (key) => collection(db, 'rooms', key, 'tasks');
 const attRef = (key, taskId) => collection(db, 'rooms', key, 'tasks', taskId, 'attachments');
 const blobRef = (key, taskId, attId) => doc(db, 'rooms', key, 'tasks', taskId, 'attachments', attId, 'blob', 'data');
+const commentsRef = (key, taskId) => collection(db, 'rooms', key, 'tasks', taskId, 'comments');
 
 export async function createRoom(name) {
   const key = generateKey();
@@ -47,6 +48,7 @@ function normalize(snap) {
     doneBy: d.doneBy ?? '',
     doneAtMs: d.doneAt ? d.doneAt.toMillis() : null,
     attachmentCount: d.attachmentCount ?? 0,
+    commentCount: d.commentCount ?? 0,
     updatedAtMs: d.updatedAt ? d.updatedAt.toMillis() : null,
     updatedBy: d.updatedBy ?? '',
   };
@@ -84,6 +86,7 @@ export async function addTask(key, value, identity) {
     doneAt: null,
     doneBy: '',
     attachmentCount: 0,
+    commentCount: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     updatedBy: identity.name,
@@ -113,16 +116,21 @@ export async function setDone(key, id, done, identity) {
   await updateDoc(doc(tasksRef(key), id), { ...patch, updatedAt: serverTimestamp(), updatedBy: identity.name });
 }
 
-/** 항목과 그 첨부(메타·내용)를 한 배치로 지운다. Firestore는 하위 컬렉션을 자동으로 지우지 않는다. */
+/** 항목과 그 첨부(메타·내용)·댓글을 지운다. Firestore는 하위 컬렉션을 자동으로 지우지 않는다. 배치 500 한도 때문에 400개씩 나눠 커밋한다. */
 export async function deleteTask(key, id) {
-  const atts = await getDocs(attRef(key, id));
-  const batch = writeBatch(db);
+  const [atts, comments] = await Promise.all([getDocs(attRef(key, id)), getDocs(commentsRef(key, id))]);
+  const refs = [];
   for (const a of atts.docs) {
-    batch.delete(a.ref);
-    if (a.data().kind === 'file') batch.delete(blobRef(key, id, a.id));
+    refs.push(a.ref);
+    if (a.data().kind === 'file') refs.push(blobRef(key, id, a.id));
   }
-  batch.delete(doc(tasksRef(key), id));
-  await batch.commit();
+  for (const c of comments.docs) refs.push(c.ref);
+  refs.push(doc(tasksRef(key), id)); // 항목 문서는 마지막에: 중간에 실패해도 고아 항목이 남지 않는다
+  for (let i = 0; i < refs.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const ref of refs.slice(i, i + 400)) batch.delete(ref);
+    await batch.commit();
+  }
 }
 
 // ---------- 첨부 ----------
@@ -187,5 +195,30 @@ export async function deleteAttachment(key, taskId, att, identity) {
   batch.delete(doc(attRef(key, taskId), att.id));
   if (att.kind === 'file') batch.delete(blobRef(key, taskId, att.id));
   touchTask(batch, key, taskId, -1, identity);
+  await batch.commit();
+}
+
+// ---------- 댓글 ----------
+export function subscribeComments(key, taskId, onChange, onError) {
+  const q = query(commentsRef(key, taskId), orderBy('createdAt'));
+  return onSnapshot(q, (qs) => onChange(qs.docs.map((s) => {
+    const d = s.data({ serverTimestamps: 'estimate' });
+    return { id: s.id, text: d.text, authorName: d.authorName, authorCompany: d.authorCompany, createdAtMs: d.createdAt ? d.createdAt.toMillis() : null };
+  })), onError);
+}
+
+export async function addComment(key, taskId, text, identity) {
+  const batch = writeBatch(db);
+  batch.set(doc(commentsRef(key, taskId)), {
+    text, authorName: identity.name, authorCompany: identity.company, createdAt: serverTimestamp(),
+  });
+  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(1), updatedAt: serverTimestamp(), updatedBy: identity.name });
+  await batch.commit();
+}
+
+export async function deleteComment(key, taskId, commentId, identity) {
+  const batch = writeBatch(db);
+  batch.delete(doc(commentsRef(key, taskId), commentId));
+  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(-1), updatedAt: serverTimestamp(), updatedBy: identity.name });
   await batch.commit();
 }

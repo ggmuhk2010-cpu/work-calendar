@@ -16,7 +16,7 @@ const tasksCol = () => collection(db, 'rooms', key, 'tasks');
 const base = () => ({
   kind: 'request', title: '규칙 테스트', memo: '', start: '2026-09-14', end: '2026-09-14', time: '',
   toCompany: 'A사', assignee: '', fromName: who.name, fromCompany: who.company,
-  status: 'open', doneAt: null, doneBy: '', attachmentCount: 0,
+  status: 'open', doneAt: null, doneBy: '', attachmentCount: 0, commentCount: 0,
   createdAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: who.name,
 });
 const touch = () => ({ updatedAt: serverTimestamp(), updatedBy: who.name });
@@ -80,7 +80,7 @@ test('secrecy: listing the rooms collection is denied (room IDs are the secret k
   await denied(getDocs(query(collection(db, 'rooms'), limit(5))));
 });
 
-test('attachments: link and file (with blob) allowed; bad url, oversize, bad encoding, update, count > 10 denied; batch delete works', async () => {
+test('attachments and comments: valid writes allowed; bad url, oversize, bad encoding, update, bad counts, empty/oversize comment, extra field denied; batch delete works', async () => {
   const taskRef = await addDoc(tasksCol(), base());
   created.push(taskRef);
   const atts = collection(db, 'rooms', key, 'tasks', taskRef.id, 'attachments');
@@ -129,4 +129,32 @@ test('attachments: link and file (with blob) allowed; bad url, oversize, bad enc
   await b3.commit();
   assert.equal((await getDocs(atts)).size, 0);
   assert.equal((await getDoc(taskRef)).data().attachmentCount, 0);
+
+  // 댓글: 같은 항목에 이어서 확인한다(테스트용 room을 더 만들지 않으려고).
+  const cmts = collection(db, 'rooms', key, 'tasks', taskRef.id, 'comments');
+  const author = () => ({ authorName: who.name, authorCompany: who.company, createdAt: serverTimestamp() });
+
+  const c1 = writeBatch(db);
+  const commentRef = doc(cmts);
+  c1.set(commentRef, { text: '확인했습니다.', ...author() });
+  c1.update(taskRef, { commentCount: increment(1), ...touch() });
+  await c1.commit();
+  assert.equal((await getDocs(cmts)).size, 1);
+  assert.equal((await getDoc(taskRef)).data().commentCount, 1);
+  assert.equal((await getDoc(commentRef)).data().text, '확인했습니다.');
+
+  await denied(setDoc(doc(cmts), { text: '', ...author() }));
+  await denied(setDoc(doc(cmts), { text: '가'.repeat(2001), ...author() }));
+  await denied(setDoc(doc(cmts), { text: '정상', hacked: true, ...author() }));
+  await denied(setDoc(doc(cmts), { text: '정상', authorName: '', authorCompany: who.company, createdAt: serverTimestamp() }));
+  await denied(setDoc(doc(cmts), { text: '정상', ...author(), createdAt: new Date() }));
+  await denied(updateDoc(commentRef, { text: '바꿈' }));
+  await denied(updateDoc(taskRef, { commentCount: -1, ...touch() }));
+
+  const c2 = writeBatch(db);
+  c2.delete(commentRef);
+  c2.update(taskRef, { commentCount: increment(-1), ...touch() });
+  await c2.commit();
+  assert.equal((await getDocs(cmts)).size, 0);
+  assert.equal((await getDoc(taskRef)).data().commentCount, 0);
 });

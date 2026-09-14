@@ -3,6 +3,7 @@ import { isDateStr } from './calendar.js';
 export const LIMITS = {
   title: 120, company: 40, person: 40, memo: 5000, roomName: 60,
   attachmentName: 200, url: 2000, fileStored: 716800, fileOriginal: 20971520, attachmentsPerTask: 10,
+  comment: 2000,
 };
 export const KINDS = ['request', 'event'];
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -50,6 +51,13 @@ export function validateLink(input = {}) {
   else if (v.url.length > LIMITS.url) errors.url = `주소는 ${LIMITS.url}자 이하여야 합니다.`;
   if (v.name.length > LIMITS.attachmentName) errors.name = `제목은 ${LIMITS.attachmentName}자 이하로 입력하세요.`;
   return { ok: Object.keys(errors).length === 0, errors, value: v };
+}
+
+export function validateComment(text) {
+  const value = trimStr(text);
+  if (!value) return { ok: false, error: '댓글을 입력하세요.', value };
+  if (value.length > LIMITS.comment) return { ok: false, error: `댓글은 ${LIMITS.comment}자 이하로 입력하세요.`, value };
+  return { ok: true, error: null, value };
 }
 
 export function validateIdentity(input = {}) {

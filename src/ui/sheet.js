@@ -1,7 +1,7 @@
 import { esc } from './dom.js';
 import { openModal, confirmDialog } from './modals.js';
 import { toast } from './toast.js';
-import { LIMITS, validateLink } from '../validate.js';
+import { LIMITS, validateLink, validateComment } from '../validate.js';
 import { youtubeId, hostOf, formatBytes } from '../links.js';
 import { prepareFile, decodeAttachment } from '../files.js';
 import { companyColor } from '../colors.js';
@@ -57,6 +57,25 @@ function attachmentRowHtml(att) {
   </li>`;
 }
 
+/** 로컬 시각 M/D HH:MM */
+function formatCommentTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function commentRowHtml(c) {
+  return `<li class="comment-row">
+    <div class="comment-head">
+      <span class="comment-who">${esc(c.authorName)} · ${esc(c.authorCompany)}</span>
+      <span class="comment-time">${esc(formatCommentTime(c.createdAtMs))}</span>
+      <button class="btn btn-sm btn-ghost btn-danger-text" data-comment-action="delete" data-comment="${esc(c.id)}">삭제</button>
+    </div>
+    <p class="comment-text">${esc(c.text)}</p>
+  </li>`;
+}
+
 function downloadBytes(bytes, name, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = document.createElement('a');
@@ -76,6 +95,7 @@ export function openHtmlViewer({ name, html, bytes, type }) {
 export function openDetailSheet({ task, identity, today, handlers }) {
   const isEvent = task.kind === 'event';
   const previewUrls = new Map();
+  let unsubscribeComments = null;
   const { el, close } = openModal(`
     <div class="grabber" aria-hidden="true"></div>
     ${headerHtml(task, today)}
@@ -98,6 +118,15 @@ export function openDetailSheet({ task, identity, today, handlers }) {
       <ul class="att-list"><li class="hint">첨부 불러오는 중…</li></ul>
       <p class="hint">파일은 압축 후 700KB까지(HTML·문서류는 원본 수 MB 가능, 사진은 작게). 큰 파일은 링크로 붙이세요.</p>
     </section>
+    <section class="sheet-comments">
+      <h3>댓글 <span class="count" data-comment-count>${task.commentCount ?? 0}</span></h3>
+      <ul class="comment-list"><li class="hint">댓글 불러오는 중…</li></ul>
+      <form id="comment-form" class="comment-form" novalidate>
+        <textarea name="comment" rows="2" maxlength="${LIMITS.comment}" placeholder="댓글을 입력하세요"></textarea>
+        <button type="submit" class="btn btn-sm btn-primary">등록</button>
+      </form>
+      <p class="field-error" data-error-for="comment"></p>
+    </section>
     <div class="modal-actions sheet-actions">
       <button class="btn btn-ghost" data-action-sheet="open-date">달력에서 보기</button>
       <button class="btn btn-ghost btn-danger-text" data-action-sheet="delete">삭제</button>
@@ -106,7 +135,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
         ? '<button class="btn" data-action-sheet="reopen">완료 취소</button>'
         : '<button class="btn btn-primary btn-complete" data-action-sheet="complete">완료</button>')}
       <button class="btn" data-close>닫기</button>
-    </div>`, { className: 'modal-wide modal-sheet', onClose: () => { for (const u of previewUrls.values()) URL.revokeObjectURL(u); previewUrls.clear(); } });
+    </div>`, { className: 'modal-wide modal-sheet', onClose: () => { unsubscribeComments?.(); for (const u of previewUrls.values()) URL.revokeObjectURL(u); previewUrls.clear(); } });
 
   const list = el.querySelector('.att-list');
   const countEl = el.querySelector('[data-att-count]');
@@ -144,6 +173,16 @@ export function openDetailSheet({ task, identity, today, handlers }) {
       else if (action === 'edit') await handlers.onEdit(task);
       else if (action === 'delete') await handlers.onDelete(task);
       else if (action === 'open-date') await handlers.onOpenDate(task);
+      return;
+    }
+    const commentBtn = e.target.closest('[data-comment-action]');
+    if (commentBtn) {
+      if (!(await handlers.requireIdentity())) return;
+      commentBtn.disabled = true;
+      try {
+        await handlers.onDeleteComment(task, commentBtn.dataset.comment);
+        toast('댓글을 삭제했습니다.');
+      } catch (err) { console.error(err); commentBtn.disabled = false; toast(SAVE_FAIL, 'error'); }
       return;
     }
     const attBtn = e.target.closest('[data-att-action]');
@@ -252,6 +291,36 @@ export function openDetailSheet({ task, identity, today, handlers }) {
       linkForm.hidden = true; linkForm.reset();
       toast('링크를 첨부했습니다.');
       await reload();
+    } catch (err) { console.error(err); toast(SAVE_FAIL, 'error'); }
+    finally { btn.disabled = false; }
+  });
+
+  // ---- 댓글 ----
+  const commentList = el.querySelector('.comment-list');
+  const commentCountEl = el.querySelector('[data-comment-count]');
+  const commentForm = el.querySelector('#comment-form');
+  const commentError = el.querySelector('[data-error-for="comment"]');
+
+  unsubscribeComments = handlers.subscribeComments(
+    task,
+    (rows) => {
+      commentCountEl.textContent = String(rows.length);
+      commentList.innerHTML = rows.length ? rows.map(commentRowHtml).join('') : '<li class="hint">아직 댓글이 없습니다.</li>';
+    },
+    (err) => { console.error(err); commentList.innerHTML = '<li class="hint">댓글을 불러오지 못했습니다.</li>'; },
+  );
+
+  commentForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = validateComment(commentForm.elements.comment.value);
+    commentError.textContent = r.error || '';
+    if (!r.ok) return;
+    if (!(await handlers.requireIdentity())) return;
+    const btn = commentForm.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      await handlers.onAddComment(task, r.value);
+      commentForm.reset();
     } catch (err) { console.error(err); toast(SAVE_FAIL, 'error'); }
     finally { btn.disabled = false; }
   });

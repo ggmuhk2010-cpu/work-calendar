@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateTask, validateIdentity, validateRoomName, validateLink, LIMITS, KINDS } from '../src/validate.js';
+import { validateTask, validateIdentity, validateRoomName, validateLink, validateComment, LIMITS, KINDS } from '../src/validate.js';
 
 const good = { title: ' 촬영 콘티 전달 ', toCompany: 'A사', assignee: '', start: '2026-09-14', end: '', memo: '' };
 
 test('LIMITS and KINDS match the spec', () => {
-  assert.deepEqual(LIMITS, { title: 120, company: 40, person: 40, memo: 5000, roomName: 60, attachmentName: 200, url: 2000, fileStored: 716800, fileOriginal: 20971520, attachmentsPerTask: 10 });
+  assert.deepEqual(LIMITS, { title: 120, company: 40, person: 40, memo: 5000, roomName: 60, attachmentName: 200, url: 2000, fileStored: 716800, fileOriginal: 20971520, attachmentsPerTask: 10, comment: 2000 });
   assert.deepEqual(KINDS, ['request', 'event']);
 });
 
@@ -59,6 +59,16 @@ test('validateLink', () => {
   assert.ok(validateLink({ name: 'a'.repeat(201), url: 'https://x.com' }).errors.name);
   assert.ok(validateLink({ name: '', url: 'https://x.com/' + 'a'.repeat(2000) }).errors.url);
   assert.equal(validateLink({ name: '', url: 'HTTPS://Example.com/A' }).value.url, 'https://Example.com/A');
+});
+
+test('validateComment', () => {
+  assert.deepEqual(validateComment('  확인했습니다  '), { ok: true, error: null, value: '확인했습니다' });
+  assert.equal(validateComment('   ').ok, false);
+  assert.ok(validateComment('').error);
+  assert.ok(validateComment(undefined).error);
+  assert.equal(validateComment('가'.repeat(2000)).ok, true);
+  assert.equal(validateComment('가'.repeat(2001)).ok, false);
+  assert.ok(validateComment('가'.repeat(2001)).error.includes('2000'));
 });
 
 test('validateIdentity', () => {
