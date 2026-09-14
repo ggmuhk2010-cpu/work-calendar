@@ -1844,7 +1844,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp } from 'firebase/app';
 import {
-  getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, getDoc, serverTimestamp, terminate,
+  getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, query, limit,
+  serverTimestamp, terminate,
 } from 'firebase/firestore';
 import { firebaseConfig } from '../firebase-config.js';
 import { generateKey } from '../src/key.js';
@@ -1905,12 +1906,17 @@ test('task: update cannot change createdAt; reading a random room is allowed but
   const other = await getDoc(doc(db, 'rooms', generateKey()));
   assert.equal(other.exists(), false);
 });
+
+test('secrecy: listing the rooms collection is denied (room IDs are the secret keys)', async () => {
+  await denied(getDocs(collection(db, 'rooms')));
+  await denied(getDocs(query(collection(db, 'rooms'), limit(5))));
+});
 ```
 
 - [ ] **Step 3: 실행**
 
 Run: `npm run test:rules`
-Expected: 4 pass, 0 fail. 실행 시간은 네트워크 때문에 5~20초.
+Expected: 5 pass, 0 fail. 실행 시간은 네트워크 때문에 5~20초.
 - `120-char Korean title` 이 permission-denied로 실패하면 규칙의 `size()`가 바이트 단위로 센 것이다. 이 경우 `firestore.rules`의 상한을 전부 3배(제목 360, 회사·이름 120, 메모 6000, 캘린더 이름 180)로 올리고 함수 위에 `// size()는 UTF-8 바이트 기준이라 한글 1자=3바이트, 상한은 문자 상한×3` 주석을 단 뒤 Task 6 Step 5로 재배포하고 다시 실행한다. 클라이언트 `LIMITS`는 그대로 둔다.
 - 첫 실행에서 `PERMISSION_DENIED` 가 전부에 뜨면 규칙 배포가 반영되기 전이다. 30초 뒤 재실행.
 
