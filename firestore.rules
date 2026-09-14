@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function validKey(k) { return k.matches('^[a-z0-9]{20,64}$'); }
+    function str(v, max) { return v is string && v.size() <= max; }
+    function nonEmpty(v, max) { return str(v, max) && v.size() >= 1; }
+    function dateStr(v) { return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+
+    function taskFields() {
+      return ['title', 'memo', 'start', 'end', 'toCompany', 'assignee', 'fromName', 'fromCompany',
+              'status', 'doneAt', 'doneBy', 'createdAt', 'updatedAt', 'updatedBy'];
+    }
+
+    function validTask(d) {
+      return d.keys().hasOnly(taskFields()) && d.keys().hasAll(taskFields())
+        && nonEmpty(d.title, 120)
+        && str(d.memo, 2000)
+        && dateStr(d.start) && dateStr(d.end) && d.start <= d.end
+        && nonEmpty(d.toCompany, 40)
+        && str(d.assignee, 40)
+        && nonEmpty(d.fromName, 40)
+        && nonEmpty(d.fromCompany, 40)
+        && d.status in ['open', 'done']
+        && ((d.status == 'done' && d.doneAt is timestamp) || (d.status == 'open' && d.doneAt == null))
+        && str(d.doneBy, 40)
+        && d.createdAt is timestamp
+        && d.updatedAt == request.time
+        && nonEmpty(d.updatedBy, 40);
+    }
+
+    match /rooms/{key} {
+      allow read: if validKey(key);
+      allow create: if validKey(key)
+        && request.resource.data.keys().hasOnly(['name', 'createdAt'])
+        && request.resource.data.keys().hasAll(['name', 'createdAt'])
+        && nonEmpty(request.resource.data.name, 60)
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+
+      match /tasks/{taskId} {
+        allow read: if validKey(key);
+        allow create: if validKey(key) && validTask(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+        allow update: if validKey(key) && validTask(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if validKey(key);
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
