@@ -75,6 +75,7 @@ export function openHtmlViewer({ name, html, bytes, type }) {
 
 export function openDetailSheet({ task, identity, today, handlers }) {
   const isEvent = task.kind === 'event';
+  const previewUrls = new Map();
   const { el, close } = openModal(`
     <div class="grabber" aria-hidden="true"></div>
     ${headerHtml(task, today)}
@@ -105,7 +106,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
         ? '<button class="btn" data-action-sheet="reopen">완료 취소</button>'
         : '<button class="btn btn-primary btn-complete" data-action-sheet="complete">완료</button>')}
       <button class="btn" data-close>닫기</button>
-    </div>`, { className: 'modal-wide modal-sheet' });
+    </div>`, { className: 'modal-wide modal-sheet', onClose: () => { for (const u of previewUrls.values()) URL.revokeObjectURL(u); previewUrls.clear(); } });
 
   const list = el.querySelector('.att-list');
   const countEl = el.querySelector('[data-att-count]');
@@ -113,8 +114,6 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   const addLinkBtn = el.querySelector('#att-add-link');
   let attachments = [];
   const dataCache = new Map();
-  const previewUrls = new Map();
-  const closeAll = () => { for (const u of previewUrls.values()) URL.revokeObjectURL(u); previewUrls.clear(); close(); };
 
   async function reload() {
     try {
@@ -139,7 +138,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
     const sheetBtn = e.target.closest('[data-action-sheet]');
     if (sheetBtn) {
       const action = sheetBtn.dataset.actionSheet;
-      closeAll();
+      close();
       if (action === 'complete') await handlers.onComplete(task);
       else if (action === 'reopen') await handlers.onReopen(task);
       else if (action === 'edit') await handlers.onEdit(task);
@@ -258,5 +257,5 @@ export function openDetailSheet({ task, identity, today, handlers }) {
   });
 
   reload();
-  return { close: closeAll };
+  return { close };
 }
