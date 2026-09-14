@@ -34,8 +34,14 @@
 
 ## 3. 화면
 
-디자인 기준: 흰 바탕의 카드형 레이아웃, 모서리 8px, 회사별 파스텔 태그, 상태 배지, 눈에 띄는 단일 액션 버튼("완료").
-글꼴은 Pretendard(CDN) + 시스템 글꼴 대체. 전화기 폭(약 400px)에서도 동작한다.
+디자인 기준: Apple의 **iOS and iPadOS 27 UI kit**(Figma 커뮤니티 1651309003795292092)의 시각 언어를 웹으로 옮긴다.
+- 색: 시스템 색(Blue #007AFF, Green #34C759, Red #FF3B30, Orange #FF9500, Purple #AF52DE, Pink #FF2D55, Teal #30B0C7, Indigo #5856D6, Yellow #FFCC00),
+  배경 systemGroupedBackground #F2F2F7, 표면 #FFFFFF, 보조 라벨 rgba(60,60,67,.6), 구분선 rgba(60,60,67,.29), 채움 rgba(120,120,128,.12).
+- 서체: `-apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", Pretendard, …` (Apple 기기는 SF + Apple SD Gothic Neo, 그 외는 Pretendard). 본문 15~17px, 제목 20~22px, 큰 제목 34px.
+- 형태: 캡슐(pill) 버튼·세그먼트 컨트롤·필터 칩, inset grouped 카드(모서리 20px, 행 14px), 시트형 패널·모달(모서리 28px, 모바일은 하단 시트 + 그래버).
+- 재질: 상단 바와 토스트는 Liquid Glass 느낌(반투명 흰색 + backdrop blur + 얇은 하이라이트 테두리).
+- 액션: 기본 액션은 시스템 블루 채움 캡슐, "완료"는 시스템 그린 채움 캡슐, 삭제는 시스템 레드 텍스트.
+전화기 폭(약 400px)에서도 동작한다. 다크 모드는 v1 범위 밖.
 
 ### 3-1. 시작 화면 (키 없이 접속)
 
