@@ -94,6 +94,7 @@ export async function addTask(key, value, identity) {
   return ref.id;
 }
 
+// increment(0): 이전 버전에서 만든 문서에 없는 카운터 필드를 0으로 만들어 규칙(hasAll)을 통과시킨다.
 export async function updateTask(key, id, value, identity) {
   await updateDoc(doc(tasksRef(key), id), {
     kind: value.kind,
@@ -104,6 +105,8 @@ export async function updateTask(key, id, value, identity) {
     time: value.time,
     toCompany: value.toCompany,
     assignee: value.assignee,
+    attachmentCount: increment(0),
+    commentCount: increment(0),
     updatedAt: serverTimestamp(),
     updatedBy: identity.name,
   });
@@ -113,7 +116,9 @@ export async function setDone(key, id, done, identity) {
   const patch = done
     ? { status: 'done', doneAt: serverTimestamp(), doneBy: identity.name }
     : { status: 'open', doneAt: null, doneBy: '' };
-  await updateDoc(doc(tasksRef(key), id), { ...patch, updatedAt: serverTimestamp(), updatedBy: identity.name });
+  await updateDoc(doc(tasksRef(key), id), {
+    ...patch, attachmentCount: increment(0), commentCount: increment(0), updatedAt: serverTimestamp(), updatedBy: identity.name,
+  });
 }
 
 /** 항목과 그 첨부(메타·내용)·댓글을 지운다. Firestore는 하위 컬렉션을 자동으로 지우지 않는다. 배치 500 한도 때문에 400개씩 나눠 커밋한다. */
@@ -162,7 +167,7 @@ export async function getAttachmentData(key, taskId, attId) {
 
 function touchTask(batch, key, taskId, delta, identity) {
   batch.update(doc(tasksRef(key), taskId), {
-    attachmentCount: increment(delta), updatedAt: serverTimestamp(), updatedBy: identity.name,
+    attachmentCount: increment(delta), commentCount: increment(0), updatedAt: serverTimestamp(), updatedBy: identity.name,
   });
 }
 
@@ -212,13 +217,17 @@ export async function addComment(key, taskId, text, identity) {
   batch.set(doc(commentsRef(key, taskId)), {
     text, authorName: identity.name, authorCompany: identity.company, createdAt: serverTimestamp(),
   });
-  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(1), updatedAt: serverTimestamp(), updatedBy: identity.name });
+  batch.update(doc(tasksRef(key), taskId), {
+    attachmentCount: increment(0), commentCount: increment(1), updatedAt: serverTimestamp(), updatedBy: identity.name,
+  });
   await batch.commit();
 }
 
 export async function deleteComment(key, taskId, commentId, identity) {
   const batch = writeBatch(db);
   batch.delete(doc(commentsRef(key, taskId), commentId));
-  batch.update(doc(tasksRef(key), taskId), { commentCount: increment(-1), updatedAt: serverTimestamp(), updatedBy: identity.name });
+  batch.update(doc(tasksRef(key), taskId), {
+    attachmentCount: increment(0), commentCount: increment(-1), updatedAt: serverTimestamp(), updatedBy: identity.name,
+  });
   await batch.commit();
 }

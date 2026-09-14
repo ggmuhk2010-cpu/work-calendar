@@ -178,6 +178,7 @@ export function openDetailSheet({ task, identity, today, handlers }) {
     const commentBtn = e.target.closest('[data-comment-action]');
     if (commentBtn) {
       if (!(await handlers.requireIdentity())) return;
+      if (!(await confirmDialog('이 댓글을 삭제할까요?'))) return;
       commentBtn.disabled = true;
       try {
         await handlers.onDeleteComment(task, commentBtn.dataset.comment);

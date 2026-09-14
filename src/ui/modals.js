@@ -144,6 +144,8 @@ export function openTaskForm({ task, date, identity, companies, existingCount = 
   const linkUrl = el.querySelector('#form-link-url');
   const linkName = el.querySelector('#form-link-name');
   const linkError = el.querySelector('[data-error-for="link"]');
+  const linkAddBtn = el.querySelector('#form-link-add');
+  const submitBtn = form.querySelector('button[type=submit]');
 
   function renderPending() {
     attList.innerHTML = pending.map(pendingRowHtml).join('');
@@ -181,6 +183,7 @@ export function openTaskForm({ task, date, identity, companies, existingCount = 
     if (!files.length) return;
     addFileBtn.disabled = true;
     addFileBtn.textContent = '압축 중…';
+    submitBtn.disabled = true;
     for (const file of files) {
       if (!hasRoom()) break;
       try {
@@ -193,6 +196,7 @@ export function openTaskForm({ task, date, identity, companies, existingCount = 
     }
     addFileBtn.textContent = '파일 추가';
     addFileBtn.disabled = false;
+    submitBtn.disabled = false;
   });
   addLinkBtn.addEventListener('click', () => {
     if (!hasRoom()) return;
@@ -200,7 +204,7 @@ export function openTaskForm({ task, date, identity, companies, existingCount = 
     linkUrl.focus();
   });
   el.querySelector('#form-link-cancel').addEventListener('click', closeLinkRow);
-  el.querySelector('#form-link-add').addEventListener('click', addLink);
+  linkAddBtn.addEventListener('click', addLink);
   // 폼 안이라 엔터를 그냥 두면 항목이 저장돼 버린다.
   linkRow.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addLink(); } });
   attList.addEventListener('click', (e) => {
@@ -220,18 +224,18 @@ export function openTaskForm({ task, date, identity, companies, existingCount = 
     });
     showErrors(form, r.errors);
     if (!r.ok) return;
-    const btn = form.querySelector('button[type=submit]');
-    const label = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '저장 중…';
+    const label = submitBtn.textContent;
+    const lockBtns = [submitBtn, addFileBtn, addLinkBtn, linkAddBtn, ...attList.querySelectorAll('[data-pending-remove]')];
+    submitBtn.textContent = '저장 중…';
+    lockBtns.forEach((b) => { b.disabled = true; });
     try {
-      await onSubmit(r.value, pending);
+      await onSubmit(r.value, pending.slice());
       close();
     } catch (err) {
       console.error(err);
       toast('저장하지 못했습니다. 잠시 후 다시 시도하세요.', 'error');
-      btn.textContent = label;
-      btn.disabled = false;
+      submitBtn.textContent = label;
+      lockBtns.forEach((b) => { b.disabled = false; });
     }
   });
 }

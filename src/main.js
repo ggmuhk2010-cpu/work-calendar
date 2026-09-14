@@ -227,9 +227,9 @@ async function handleAction(action, taskId) {
         task: null, date: state.selectedDate ?? today, identity: id, companies: companiesOf(allTasks()),
         onSubmit: async (v, pending) => {
           const newId = await addTask(state.key, v, id);
+          toast(v.kind === 'event' ? '일정을 추가했습니다.' : '작업을 요청했습니다.');
           await uploadPending(newId, pending, id);
           if (v.start < liveFrom()) await refreshArchived(newId);
-          toast(v.kind === 'event' ? '일정을 추가했습니다.' : '작업을 요청했습니다.');
         },
       });
       break;
@@ -243,9 +243,9 @@ async function handleAction(action, taskId) {
         task, date: task.start, identity: id, companies: companiesOf(allTasks()), existingCount: task.attachmentCount ?? 0,
         onSubmit: async (v, pending) => {
           await updateTask(state.key, task.id, v, id);
+          toast('저장했습니다.');
           await uploadPending(task.id, pending, id);
           if (!isLive(task.id) || v.start < liveFrom()) await refreshArchived(task.id);
-          toast('저장했습니다.');
         },
       });
       break;
