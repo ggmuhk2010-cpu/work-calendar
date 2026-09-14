@@ -209,7 +209,7 @@ async function handleAction(action, taskId) {
         onSubmit: async (v) => {
           const newId = await addTask(state.key, v, id);
           if (v.start < liveFrom()) await refreshArchived(newId);
-          toast('작업을 요청했습니다.');
+          toast(v.kind === 'event' ? '일정을 추가했습니다.' : '작업을 요청했습니다.');
         },
       });
       break;

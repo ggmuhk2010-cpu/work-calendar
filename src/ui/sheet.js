@@ -65,10 +65,10 @@ function downloadBytes(bytes, name, type) {
 }
 
 export function openHtmlViewer({ name, html, bytes, type }) {
-  // 첨부 HTML은 신뢰할 수 없으므로 allow-same-origin 없는 샌드박스 안에서만 실행한다. 새 창(blob:)으로 열면 앱과 같은 출처가 되므로 제공하지 않는다.
+  // 첨부 HTML은 신뢰할 수 없으므로 allow-scripts만 허용한 샌드박스(불투명 출처) 안에서 실행한다. 새 창(blob:)으로 열면 앱과 같은 출처가 되므로 제공하지 않는다.
   const { el } = openModal(`
     <div class="viewer-head"><h2>${esc(name)}</h2><div><button class="btn btn-sm" id="viewer-download">다운로드</button><button class="btn btn-sm" data-close>닫기</button></div></div>
-    <iframe class="viewer-frame" sandbox="allow-scripts allow-popups allow-forms" title="${esc(name)}"></iframe>`, { className: 'modal-viewer' });
+    <iframe class="viewer-frame" sandbox="allow-scripts" title="${esc(name)}"></iframe>`, { className: 'modal-viewer' });
   el.querySelector('.viewer-frame').srcdoc = html;
   el.querySelector('#viewer-download').addEventListener('click', () => downloadBytes(bytes, name, type));
 }

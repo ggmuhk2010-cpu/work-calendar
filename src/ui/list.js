@@ -8,7 +8,7 @@ function rowHtml(task, today) {
   const isEvent = task.kind === 'event';
   const done = !isEvent && task.status === 'done';
   return `<div class="row ${done ? 'row-done' : ''}" data-task-row="${esc(task.id)}">
-    <button class="row-date ${isOverdue(task, today) ? 'overdue' : ''}" data-open-date="${esc(task.start)}" title="달력에서 보기">${esc(isEvent ? task.start : task.end)}${task.time ? `<span class="row-time">${esc(task.time)}</span>` : ''}</button>
+    <button class="row-date ${isOverdue(task, today) ? 'overdue' : ''}" data-open-date="${esc(isEvent ? task.start : task.end)}" title="달력에서 보기">${esc(isEvent ? task.start : task.end)}${task.time ? `<span class="row-time">${esc(task.time)}</span>` : ''}</button>
     <button class="row-title" data-open-task="${esc(task.id)}">${esc(task.title)}${task.attachmentCount > 0 ? ` <span class="att-count">📎${task.attachmentCount}</span>` : ''}</button>
     ${c ? `<span class="tag" style="--chip-bg:${c.bg};--chip-fg:${c.fg}">${esc(task.toCompany)}</span>` : '<span class="tag tag-none">-</span>'}
     <span class="row-people">${esc(task.assignee || '-')} · ${esc(task.fromName)}(${esc(task.fromCompany)})</span>
