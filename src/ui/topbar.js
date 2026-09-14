@@ -12,6 +12,7 @@ export function renderTopbar(root, { roomName, view, identity, online }) {
         <button class="tab ${view === 'list' ? 'active' : ''}" data-view="list" role="tab">할 일</button>
       </nav>
       <div class="topbar-right">
+        <button class="btn btn-primary" data-action="add-task">+ 작업 요청</button>
         <button class="btn btn-ghost" data-action="invite">초대 링크</button>
         <button class="identity-chip" data-action="identity">${identity ? `${esc(identity.name)} · ${esc(identity.company)}` : '이름 입력'}</button>
       </div>

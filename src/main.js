@@ -1,6 +1,6 @@
 import { firebaseConfig } from '../firebase-config.js';
 import {
-  initStore, createRoom, getRoom, subscribeTasks, fetchTasksInRange, addTask, updateTask, setDone, deleteTask,
+  initStore, createRoom, getRoom, subscribeTasks, fetchTasksInRange, getTask, addTask, updateTask, setDone, deleteTask,
 } from './store.js';
 import { keyFromHash, hashForKey } from './key.js';
 import { loadIdentity, saveIdentity } from './identity.js';
@@ -47,15 +47,26 @@ function visibleTasks() {
 }
 function findTask(id) { return allTasks().find((t) => t.id === id) ?? null; }
 function inviteLink() { return `${location.origin}${location.pathname}${location.search}${hashForKey(state.key)}`; }
+function liveFrom() { return addDays(todayStr(), -LIVE_WINDOW_DAYS); }
+function isLive(id) { return state.liveTasks.some((t) => t.id === id); }
+function pruneFilter() {
+  if (!state.filter) return;
+  const companies = companiesOf(allTasks());
+  for (const c of state.filter) if (!companies.includes(c)) state.filter.delete(c);
+  if (state.filter.size === 0) state.filter = null;
+}
+// 실시간 창 밖(60일 이전) 문서는 스냅샷이 오지 않으므로 쓰기 뒤 직접 다시 읽는다.
+async function refreshArchived(id) {
+  const t = await getTask(state.key, id);
+  if (t) state.archiveTasks.set(id, t); else state.archiveTasks.delete(id);
+  pruneFilter();
+  render();
+}
 
 // ---------- 렌더 ----------
 function render() {
   const today = todayStr();
   const companies = companiesOf(allTasks());
-  if (state.filter) {
-    for (const c of state.filter) if (!companies.includes(c)) state.filter.delete(c);
-    if (state.filter.size === 0) state.filter = null;
-  }
   const withPanel = state.view === 'calendar' && state.selectedDate;
   app.innerHTML = `
     <div id="topbar"></div>
@@ -82,24 +93,24 @@ function render() {
 // ---------- 데이터 ----------
 function startLive() {
   if (unsubscribe) unsubscribe();
-  const from = addDays(todayStr(), -LIVE_WINDOW_DAYS);
+  const from = liveFrom();
   unsubscribe = subscribeTasks(
     state.key, from,
-    (rows) => { state.liveTasks = rows; state.storeError = false; render(); },
+    (rows) => { state.liveTasks = rows; state.storeError = false; pruneFilter(); render(); },
     (err) => { console.error(err); state.storeError = true; render(); },
   );
 }
 
 async function ensureArchive(month) {
-  const liveFrom = addDays(todayStr(), -LIVE_WINDOW_DAYS);
   const { first, last } = monthRange(month);
-  if (last >= liveFrom) return; // 실시간 창이 덮는 달
+  if (last >= liveFrom()) return; // 실시간 창이 덮는 달
   const tag = `${month.year}-${month.month}`;
   if (state.loadedArchiveMonths.has(tag)) return;
   state.loadedArchiveMonths.add(tag);
   try {
     const rows = await fetchTasksInRange(state.key, addDays(first, -LIVE_WINDOW_DAYS), last);
     for (const t of rows) state.archiveTasks.set(t.id, t);
+    pruneFilter();
     render();
   } catch (err) {
     console.error(err);
@@ -129,7 +140,7 @@ async function handleAction(action, taskId) {
   const today = todayStr();
   switch (action) {
     case 'prev': state.month = addMonths(state.month, -1); state.selectedDate = null; render(); ensureArchive(state.month); break;
-    case 'next': state.month = addMonths(state.month, 1); state.selectedDate = null; render(); break;
+    case 'next': state.month = addMonths(state.month, 1); state.selectedDate = null; render(); ensureArchive(state.month); break;
     case 'today': state.month = monthOf(today); state.selectedDate = today; render(); break;
     case 'close-panel': state.selectedDate = null; render(); break;
     case 'invite': openInviteModal({ link: inviteLink() }); break;
@@ -152,7 +163,11 @@ async function handleAction(action, taskId) {
       if (!id) break;
       openTaskForm({
         task, date: task.start, identity: id, companies: companiesOf(allTasks()),
-        onSubmit: async (v) => { await updateTask(state.key, task.id, v, id); toast('저장했습니다.'); },
+        onSubmit: async (v) => {
+          await updateTask(state.key, task.id, v, id);
+          toast('저장했습니다.');
+          if (!isLive(task.id) || v.start < liveFrom()) await refreshArchived(task.id);
+        },
       });
       break;
     }
@@ -163,6 +178,7 @@ async function handleAction(action, taskId) {
       try {
         await setDone(state.key, taskId, action === 'complete', id);
         toast(action === 'complete' ? '완료 처리했습니다.' : '완료를 취소했습니다.');
+        if (!isLive(taskId)) await refreshArchived(taskId);
       } catch (err) { console.error(err); toast(SAVE_FAIL, 'error'); }
       break;
     }
@@ -175,6 +191,8 @@ async function handleAction(action, taskId) {
       try {
         await deleteTask(state.key, task.id);
         state.archiveTasks.delete(task.id);
+        pruneFilter();
+        render();
         toast('삭제했습니다.');
       } catch (err) { console.error(err); toast('삭제하지 못했습니다.', 'error'); }
       break;
@@ -189,7 +207,11 @@ app.addEventListener('click', (e) => {
   const filterBtn = e.target.closest('[data-filter]');
   if (filterBtn) { toggleFilter(filterBtn.dataset.filter); render(); return; }
   const actionBtn = e.target.closest('[data-action]');
-  if (actionBtn) { handleAction(actionBtn.dataset.action, actionBtn.dataset.task); return; }
+  if (actionBtn) {
+    handleAction(actionBtn.dataset.action, actionBtn.dataset.task)
+      .catch((err) => { console.error(err); toast('오류가 발생했습니다. 잠시 후 다시 시도하세요.', 'error'); });
+    return;
+  }
   const openDate = e.target.closest('[data-open-date]');
   if (openDate) {
     state.view = 'calendar';
@@ -220,7 +242,7 @@ async function handleCreate(rawName) {
   try {
     const key = await createRoom(r.value);
     history.replaceState(null, '', hashForKey(key)); // replaceState는 hashchange를 안 일으킨다
-    await boot();
+    await boot({ skipIdentityPrompt: true });
     openInviteModal({ link: inviteLink() });
   } catch (err) {
     console.error(err);
@@ -230,12 +252,17 @@ async function handleCreate(rawName) {
 
 function resetRoomState() {
   if (unsubscribe) { unsubscribe(); unsubscribe = null; }
-  Object.assign(state, { key: null, room: null, selectedDate: null, filter: null, liveTasks: [], storeError: false });
+  Object.assign(state, {
+    key: null, room: null, view: 'calendar', month: monthOf(todayStr()), selectedDate: null,
+    filter: null, liveTasks: [], storeError: false,
+  });
   state.archiveTasks.clear();
   state.loadedArchiveMonths.clear();
 }
 
-async function boot() {
+let bootGen = 0;
+async function boot({ skipIdentityPrompt = false } = {}) {
+  const gen = ++bootGen;
   resetRoomState();
   const key = keyFromHash(location.hash);
   if (!key) { renderLanding(app, { missing: false, onCreate: handleCreate }); return; }
@@ -246,17 +273,19 @@ async function boot() {
     app.innerHTML = '<div class="error-banner" style="margin:16px">저장소에 연결할 수 없습니다. 잠시 후 새로고침하세요.</div>';
     return;
   }
+  if (gen !== bootGen) return; // 기다리는 사이 주소가 또 바뀜
   if (!room) { renderLanding(app, { missing: true, onCreate: handleCreate }); return; }
   state.key = key;
   state.room = room;
   render();
   startLive();
-  if (!state.identity) {
+  ensureArchive(state.month);
+  if (!state.identity && !skipIdentityPrompt) {
     openIdentityForm({ identity: null, onSave: (v) => { state.identity = saveIdentity(v); render(); } });
   }
 }
 
-window.addEventListener('hashchange', boot);
+window.addEventListener('hashchange', () => boot());
 window.addEventListener('online', () => { state.online = true; if (state.room) render(); });
 window.addEventListener('offline', () => { state.online = false; if (state.room) render(); });
 

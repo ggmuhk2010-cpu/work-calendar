@@ -2,7 +2,10 @@ import { esc } from './dom.js';
 import { validateTask, validateIdentity, LIMITS } from '../validate.js';
 import { toast } from './toast.js';
 
+let currentClose = null;
+
 function openModal(html, { onClose } = {}) {
+  if (currentClose) currentClose();
   const root = document.getElementById('modal-root');
   root.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
   const backdrop = root.firstElementChild;
@@ -10,10 +13,12 @@ function openModal(html, { onClose } = {}) {
   const close = () => {
     if (closed) return;
     closed = true;
+    if (currentClose === close) currentClose = null;
     document.removeEventListener('keydown', onKey);
     if (root.firstElementChild === backdrop) root.innerHTML = '';
     onClose?.();
   };
+  currentClose = close;
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });

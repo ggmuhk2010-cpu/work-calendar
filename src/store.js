@@ -58,6 +58,11 @@ export async function fetchTasksInRange(key, from, to) {
   return qs.docs.map(normalize);
 }
 
+export async function getTask(key, id) {
+  const snap = await getDoc(doc(tasksRef(key), id));
+  return snap.exists() ? normalize(snap) : null;
+}
+
 export async function addTask(key, value, identity) {
   const ref = await addDoc(tasksRef(key), {
     title: value.title,
