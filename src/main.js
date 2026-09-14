@@ -55,12 +55,21 @@ function pruneFilter() {
   for (const c of state.filter) if (!companies.includes(c)) state.filter.delete(c);
   if (state.filter.size === 0) state.filter = null;
 }
-// 실시간 창 밖(60일 이전) 문서는 스냅샷이 오지 않으므로 쓰기 뒤 직접 다시 읽는다.
+// 실시간 창 밖(60일 이전) 문서는 스냅샷이 오지 않으므로 쓰기 뒤 직접 다시 읽는다. 실패해도 쓰기는 이미 성공했으므로 안내만 한다.
 async function refreshArchived(id) {
-  const t = await getTask(state.key, id);
-  if (t) state.archiveTasks.set(id, t); else state.archiveTasks.delete(id);
-  pruneFilter();
-  render();
+  const gen = bootGen;
+  const key = state.key;
+  try {
+    const t = await getTask(key, id);
+    if (gen !== bootGen || state.key !== key) return;
+    if (t && t.start < liveFrom()) state.archiveTasks.set(id, t);
+    else state.archiveTasks.delete(id); // 삭제됐거나 실시간 창으로 들어온 문서는 리스너가 맡는다
+    pruneFilter();
+    render();
+  } catch (err) {
+    console.error(err);
+    if (gen === bootGen && state.key === key) toast('화면을 갱신하지 못했습니다. 새로고침하세요.', 'error');
+  }
 }
 
 // ---------- 렌더 ----------
@@ -107,15 +116,20 @@ async function ensureArchive(month) {
   const tag = `${month.year}-${month.month}`;
   if (state.loadedArchiveMonths.has(tag)) return;
   state.loadedArchiveMonths.add(tag);
+  const gen = bootGen;
+  const key = state.key;
   try {
-    const rows = await fetchTasksInRange(state.key, addDays(first, -LIVE_WINDOW_DAYS), last);
+    const rows = await fetchTasksInRange(key, addDays(first, -LIVE_WINDOW_DAYS), last);
+    if (gen !== bootGen || state.key !== key) return;
     for (const t of rows) state.archiveTasks.set(t.id, t);
     pruneFilter();
     render();
   } catch (err) {
     console.error(err);
-    state.loadedArchiveMonths.delete(tag);
-    toast('이전 달 작업을 불러오지 못했습니다.', 'error');
+    if (gen === bootGen && state.key === key) {
+      state.loadedArchiveMonths.delete(tag);
+      toast('이전 달 작업을 불러오지 못했습니다.', 'error');
+    }
   }
 }
 
@@ -152,7 +166,11 @@ async function handleAction(action, taskId) {
       if (!id) break;
       openTaskForm({
         task: null, date: state.selectedDate ?? today, identity: id, companies: companiesOf(allTasks()),
-        onSubmit: async (v) => { await addTask(state.key, v, id); toast('작업을 요청했습니다.'); },
+        onSubmit: async (v) => {
+          const newId = await addTask(state.key, v, id);
+          if (v.start < liveFrom()) await refreshArchived(newId);
+          toast('작업을 요청했습니다.');
+        },
       });
       break;
     }
@@ -165,8 +183,8 @@ async function handleAction(action, taskId) {
         task, date: task.start, identity: id, companies: companiesOf(allTasks()),
         onSubmit: async (v) => {
           await updateTask(state.key, task.id, v, id);
-          toast('저장했습니다.');
           if (!isLive(task.id) || v.start < liveFrom()) await refreshArchived(task.id);
+          toast('저장했습니다.');
         },
       });
       break;
@@ -177,8 +195,8 @@ async function handleAction(action, taskId) {
       if (!id) break;
       try {
         await setDone(state.key, taskId, action === 'complete', id);
-        toast(action === 'complete' ? '완료 처리했습니다.' : '완료를 취소했습니다.');
         if (!isLive(taskId)) await refreshArchived(taskId);
+        toast(action === 'complete' ? '완료 처리했습니다.' : '완료를 취소했습니다.');
       } catch (err) { console.error(err); toast(SAVE_FAIL, 'error'); }
       break;
     }
@@ -269,6 +287,7 @@ async function boot({ skipIdentityPrompt = false } = {}) {
   let room;
   try { room = await getRoom(key); }
   catch (err) {
+    if (gen !== bootGen) return;
     console.error(err);
     app.innerHTML = '<div class="error-banner" style="margin:16px">저장소에 연결할 수 없습니다. 잠시 후 새로고침하세요.</div>';
     return;
@@ -279,7 +298,6 @@ async function boot({ skipIdentityPrompt = false } = {}) {
   state.room = room;
   render();
   startLive();
-  ensureArchive(state.month);
   if (!state.identity && !skipIdentityPrompt) {
     openIdentityForm({ identity: null, onSave: (v) => { state.identity = saveIdentity(v); render(); } });
   }
