@@ -155,7 +155,7 @@ work-calendar/
   test/
     calendar.test.mjs     node:test
     validate.test.mjs     node:test
-    rules.test.mjs        Firestore 에뮬레이터 + @firebase/rules-unit-testing (Java 있을 때만)
+    rules.test.mjs        실제 Firestore 프로젝트에 Node로 접속해 규칙 허용·거부를 확인 (이 Mac에 Java가 없어 에뮬레이터는 쓰지 않음)
   docs/superpowers/specs/ 이 문서
 ```
 
@@ -183,7 +183,7 @@ work-calendar/
 ## 9. 검증 계획
 
 1. 단위 테스트: 월 격자(윤년·6주 경계), 날짜 연산, 기간 작업 판정, 할 일 탭 그룹화·정렬, 폼 검증 전 항목.
-2. 규칙 테스트(가능할 때): 짧은 키 거부, 잘못된 status 거부, 120자 초과 제목 거부, 정상 문서 허용, room 삭제 거부.
+2. 규칙 테스트: 규칙 배포 후 실제 프로젝트에 대해 Node 스크립트로 확인. 짧은 키 거부, 잘못된 status 거부, 120자 초과 제목 거부, 정상 문서 허용, room 삭제 거부. 테스트용 room은 끝나면 비운다.
 3. 브라우저 검증(앱 내 브라우저): 탭 두 개로 같은 링크를 열고 A에서 요청 → B에 실시간 표시, B에서 완료 → A 반영.
    전화기 폭에서 달력·패널·폼이 깨지지 않는지. 콘솔 에러 0. 스크린샷으로 보고.
 4. 실제 GitHub Pages 주소에서 새 캘린더 만들기 → 초대 링크 → 다른 브라우저 프로필로 접속까지 확인.
