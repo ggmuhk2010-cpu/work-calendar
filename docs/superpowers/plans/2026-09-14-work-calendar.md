@@ -2104,3 +2104,10 @@ Expected: 몇 분 안에 `200`. `TIMEOUT`이면 `gh api repos/ggmuhk2010-cpu/wor
 - **Placeholder scan:** 없음. 콘솔 폴백 안내문, 3배 상한 대응, 409 처리까지 명시.
 - **Type consistency:** `renderList(..., showDone)`, `taskCardHtml(task, today)`, `companyFilterHtml(companies, filter)`, `openIdentityForm({identity, onSave, onCancel})`, `confirmDialog(msg): Promise<boolean>`, `subscribeTasks(key, fromDate, onChange, onError)`, `validateRoomName → {ok, error, value}`, Task 객체의 `doneAtMs` 이름이 T1 테스트·T3 normalize·T4 list에서 동일.
 - 알려진 v1 한계(스펙 범위 내): 과거 달 1회 조회 결과는 그 세션에서 다른 사람이 삭제해도 새로고침 전까지 남는다. 60일 넘게 이어지는 작업은 실시간 창에서 빠질 수 있다.
+
+## 실행 중 계획과 달라진 점 (리뷰 결과 반영)
+
+- Task 4: 할 일 행의 완료 버튼에 `btn-complete`(그린) 추가, 모바일 `.row` 격자 4열, 시작 화면 `maxlength`를 `LIMITS.roomName`으로 단일화, `.topbar-left` 규칙 추가. 사용자 요청으로 `viewport-fit=cover`, safe-area inset, 터치 타깃 36px, 태블릿(801~1100px)·와이드(≥1400px) 브레이크포인트 추가.
+- Task 5: 실시간 창(60일) 밖 문서에 쓴 뒤 `store.getTask`로 다시 읽어 갱신(`refreshArchived`), `ensureArchive`를 `next`·`boot`에서도 호출, 캘린더 생성 직후에는 신원 모달을 띄우지 않음(`boot({ skipIdentityPrompt })`), `boot` 재진입 가드(세대 카운터), 필터 정리는 `render()` 밖(`pruneFilter`)으로 이동, 상단 바에 `+ 작업 요청` 버튼 추가, 모달을 겹쳐 열면 이전 모달을 정리(`modals.js currentClose`).
+- Task 6: 프로젝트는 CLI `projects:create`가 403(Firebase 약관 미동의)으로 실패해 사용자가 콘솔에서 생성(`work-calendar-dz7gy6-e2d5f`). CLI가 만든 빈 GCP 프로젝트 `work-calendar-dz7gy6`는 Firebase 없이 남아 있음. `firestore:databases:create`는 API 활성화 전파 대기(약 75초) 후 성공.
+- Task 7: 규칙 테스트에 `rooms` 컬렉션 나열 거부 확인 추가(5개 테스트).
