@@ -1,7 +1,9 @@
 import { firebaseConfig } from '../firebase-config.js';
 import {
   initStore, createRoom, getRoom, subscribeTasks, fetchTasksInRange, getTask, addTask, updateTask, setDone, deleteTask,
+  listAttachments, getAttachmentData, addFileAttachment, addLinkAttachment, deleteAttachment,
 } from './store.js';
+import { openDetailSheet } from './ui/sheet.js';
 import { keyFromHash, hashForKey } from './key.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { todayStr, addDays, monthOf, addMonths, monthRange, companiesOf } from './calendar.js';
@@ -150,6 +152,44 @@ function toggleFilter(c) {
   else state.filter.add(c);
 }
 
+// 실시간 창 밖 문서는 첨부 수 변경이 스냅샷으로 오지 않으므로 직접 갱신한다.
+async function afterAttachmentChange(taskId) {
+  if (!isLive(taskId)) await refreshArchived(taskId);
+}
+
+function openTask(id) {
+  const task = findTask(id);
+  if (!task) { toast('항목을 찾을 수 없습니다. 새로고침하세요.', 'error'); return; }
+  openDetailSheet({
+    task,
+    identity: state.identity,
+    today: todayStr(),
+    handlers: {
+      onComplete: (t) => handleAction('complete', t.id),
+      onReopen: (t) => handleAction('reopen', t.id),
+      onEdit: (t) => handleAction('edit', t.id),
+      onDelete: (t) => handleAction('delete', t.id),
+      onOpenDate: (t) => {
+        state.view = 'calendar';
+        state.month = monthOf(t.start);
+        state.selectedDate = t.start;
+        render();
+        ensureArchive(state.month);
+      },
+      loadAttachments: (t) => listAttachments(state.key, t.id),
+      loadData: async (t, att) => {
+        const data = await getAttachmentData(state.key, t.id, att.id);
+        if (data === null) throw new Error('첨부 내용이 없습니다.');
+        return data;
+      },
+      onAddFile: async (t, prepared) => { await addFileAttachment(state.key, t.id, prepared, state.identity); await afterAttachmentChange(t.id); },
+      onAddLink: async (t, link) => { await addLinkAttachment(state.key, t.id, link, state.identity); await afterAttachmentChange(t.id); },
+      onDeleteAttachment: async (t, att) => { await deleteAttachment(state.key, t.id, att, state.identity); await afterAttachmentChange(t.id); },
+      requireIdentity,
+    },
+  });
+}
+
 async function handleAction(action, taskId) {
   const today = todayStr();
   switch (action) {
@@ -224,6 +264,8 @@ app.addEventListener('click', (e) => {
   if (viewBtn) { state.view = viewBtn.dataset.view; render(); return; }
   const filterBtn = e.target.closest('[data-filter]');
   if (filterBtn) { toggleFilter(filterBtn.dataset.filter); render(); return; }
+  const openTaskBtn = e.target.closest('[data-open-task]');
+  if (openTaskBtn) { openTask(openTaskBtn.dataset.openTask); return; }
   const actionBtn = e.target.closest('[data-action]');
   if (actionBtn) {
     handleAction(actionBtn.dataset.action, actionBtn.dataset.task)
