@@ -4,10 +4,10 @@ import { toast } from './toast.js';
 
 let currentClose = null;
 
-function openModal(html, { onClose } = {}) {
+export function openModal(html, { onClose, className } = {}) {
   if (currentClose) currentClose();
   const root = document.getElementById('modal-root');
-  root.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
+  root.innerHTML = `<div class="modal-backdrop"><div class="modal ${className ?? ''}" role="dialog" aria-modal="true">${html}</div></div>`;
   const backdrop = root.firstElementChild;
   let closed = false;
   const close = () => {
@@ -60,35 +60,48 @@ export function openIdentityForm({ identity, onSave, onCancel }) {
 
 export function openTaskForm({ task, date, identity, companies, onSubmit }) {
   const isEdit = Boolean(task);
-  const v = task ?? { title: '', toCompany: '', assignee: '', start: date, end: date, memo: '' };
+  const v = task ?? { kind: 'request', title: '', toCompany: '', assignee: '', start: date, end: date, time: '', memo: '' };
   const { el, close } = openModal(`
-    <h2>${isEdit ? '작업 수정' : '작업 요청'}</h2>
+    <h2>${isEdit ? '수정' : '추가'}</h2>
     <form id="task-form" novalidate>
+      <div class="kind-toggle" role="radiogroup" aria-label="종류">
+        <label class="kind-option"><input type="radio" name="kind" value="request" ${v.kind !== 'event' ? 'checked' : ''}><span>작업 요청</span></label>
+        <label class="kind-option"><input type="radio" name="kind" value="event" ${v.kind === 'event' ? 'checked' : ''}><span>일정</span></label>
+      </div>
       <label>제목 <span class="req">*</span><input name="title" maxlength="${LIMITS.title}" value="${esc(v.title)}" autocomplete="off"></label>
       <p class="field-error" data-error-for="title"></p>
-      <label>담당 회사 <span class="req">*</span><input name="toCompany" list="company-list" maxlength="${LIMITS.company}" value="${esc(v.toCompany)}" autocomplete="off"></label>
+      <label><span data-company-label>${v.kind === 'event' ? '관련 회사' : '담당 회사 <span class="req">*</span>'}</span><input name="toCompany" list="company-list" maxlength="${LIMITS.company}" value="${esc(v.toCompany)}" autocomplete="off"></label>
       <datalist id="company-list">${companies.map((c) => `<option value="${esc(c)}"></option>`).join('')}</datalist>
       <p class="field-error" data-error-for="toCompany"></p>
       <label>담당자<input name="assignee" maxlength="${LIMITS.person}" value="${esc(v.assignee)}" autocomplete="off"></label>
       <p class="field-error" data-error-for="assignee"></p>
-      <div class="row2">
+      <div class="row3">
         <div><label>시작일 <span class="req">*</span><input type="date" name="start" value="${esc(v.start)}"></label><p class="field-error" data-error-for="start"></p></div>
         <div><label>마감일<input type="date" name="end" value="${esc(v.end)}"></label><p class="field-error" data-error-for="end"></p></div>
+        <div><label>시간<input type="time" name="time" value="${esc(v.time)}"></label><p class="field-error" data-error-for="time"></p></div>
       </div>
-      <label>메모<textarea name="memo" rows="3" maxlength="${LIMITS.memo}">${esc(v.memo)}</textarea></label>
+      <label>본문<textarea name="memo" rows="6" maxlength="${LIMITS.memo}" placeholder="자세한 내용, 준비물, 참고 사항…">${esc(v.memo)}</textarea></label>
       <p class="field-error" data-error-for="memo"></p>
-      <p class="muted">요청자: ${esc(identity.name)} · ${esc(identity.company)}</p>
+      <p class="muted">${isEdit ? '수정자' : '작성자'}: ${esc(identity.name)} · ${esc(identity.company)}${isEdit ? '' : ' · 첨부는 저장 후 상세 화면에서 추가합니다.'}</p>
       <div class="modal-actions">
         <button type="button" class="btn" data-close>취소</button>
-        <button type="submit" class="btn btn-primary">${isEdit ? '저장' : '요청 보내기'}</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? '저장' : '추가'}</button>
       </div>
-    </form>`);
+    </form>`, { className: 'modal-wide' });
   const form = el.querySelector('form');
+  const companyLabel = form.querySelector('[data-company-label]');
+  form.addEventListener('change', (e) => {
+    if (e.target.name !== 'kind') return;
+    companyLabel.innerHTML = e.target.value === 'event' ? '관련 회사' : '담당 회사 <span class="req">*</span>';
+  });
   form.elements.title.focus();
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = form.elements;
-    const r = validateTask({ title: f.title.value, toCompany: f.toCompany.value, assignee: f.assignee.value, start: f.start.value, end: f.end.value, memo: f.memo.value });
+    const r = validateTask({
+      kind: f.kind.value, title: f.title.value, toCompany: f.toCompany.value, assignee: f.assignee.value,
+      start: f.start.value, end: f.end.value, time: f.time.value, memo: f.memo.value,
+    });
     showErrors(form, r.errors);
     if (!r.ok) return;
     const btn = form.querySelector('button[type=submit]');

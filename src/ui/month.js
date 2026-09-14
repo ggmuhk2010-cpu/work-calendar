@@ -18,11 +18,12 @@ export function companyFilterHtml(companies, filter) {
 }
 
 function chipHtml(task, date) {
-  const c = companyColor(task.toCompany);
+  const c = task.toCompany ? companyColor(task.toCompany) : { bg: 'rgba(120, 120, 128, 0.12)', fg: '#3A3A3C' };
   const cont = task.start !== date ? '<span class="chip-cont">↔</span>' : '';
-  const done = task.status === 'done';
-  return `<button class="chip ${done ? 'chip-done' : ''}" data-task="${esc(task.id)}" data-date="${esc(date)}"
-    style="--chip-bg:${c.bg};--chip-fg:${c.fg}" title="${esc(task.title)} · ${esc(task.toCompany)}">${cont}${done ? '✓ ' : ''}${esc(task.title)}</button>`;
+  const done = task.kind !== 'event' && task.status === 'done';
+  const time = task.time ? `<span class="chip-time">${esc(task.time)}</span>` : '';
+  return `<button class="chip ${task.kind === 'event' ? 'chip-event' : ''} ${done ? 'chip-done' : ''}" data-task="${esc(task.id)}" data-date="${esc(date)}"
+    style="--chip-bg:${c.bg};--chip-fg:${c.fg}" title="${esc(task.title)}${task.toCompany ? ' · ' + esc(task.toCompany) : ''}">${cont}${done ? '✓ ' : ''}${time}${esc(task.title)}</button>`;
 }
 
 function cellHtml(cell, dayTasks, today, selectedDate) {

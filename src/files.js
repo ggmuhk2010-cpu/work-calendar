@@ -23,3 +23,27 @@ export async function gunzipBase64(data) {
   const stream = new Blob([base64ToBytes(data)]).stream().pipeThrough(new DecompressionStream('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
+
+const EXT_TYPES = { html: 'text/html', htm: 'text/html', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', txt: 'text/plain', csv: 'text/csv', json: 'application/json', md: 'text/markdown' };
+
+export function guessType(name, type) {
+  if (type) return type;
+  const ext = String(name).toLowerCase().split('.').pop();
+  return EXT_TYPES[ext] ?? 'application/octet-stream';
+}
+
+const MAX_ORIGINAL = 20971520; // 20MB
+const MAX_STORED = 716800;     // 700KB — Firestore 문서 1 MiB 한도 안에서 base64 여유
+
+/** File → Firestore에 넣을 첨부 페이로드. 한도 초과면 한국어 안내문으로 throw. */
+export async function prepareFile(file) {
+  if (file.size > MAX_ORIGINAL) throw new Error('20MB 이하 파일만 올릴 수 있습니다. 큰 파일은 링크로 첨부하세요.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const { data, storedSize } = await gzipBase64(bytes);
+  if (storedSize > MAX_STORED) throw new Error('압축 후 700KB를 넘는 파일입니다. 사진은 줄여서 올리거나, 큰 파일은 링크로 첨부하세요.');
+  return { name: file.name, type: guessType(file.name, file.type), size: bytes.length, storedSize, encoding: 'gzip', data };
+}
+
+export async function decodeAttachment(att, base64) {
+  return att.encoding === 'gzip' ? gunzipBase64(base64) : base64ToBytes(base64);
+}
