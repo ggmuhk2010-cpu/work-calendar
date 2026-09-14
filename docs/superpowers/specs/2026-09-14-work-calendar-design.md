@@ -122,7 +122,7 @@ rooms/{key}/tasks/{taskId}       작업 요청 1건 (taskId는 자동 ID)
 ## 5. 보안 규칙 (firestore.rules)
 
 - 키 검사: `^[a-z0-9]{20,64}$` 에 맞는 경로만 읽기·쓰기 허용. 그 외는 전부 거부.
-- `rooms/{key}`: 읽기·생성·수정 허용(필드는 `name`, `createdAt`만, 길이 검사). 삭제 금지.
+- `rooms/{key}`: 읽기·생성 허용(필드는 `name`, `createdAt`만, 길이 검사). 이름 변경 기능이 없으므로 수정·삭제 금지.
 - `rooms/{key}/tasks/{taskId}`: 읽기·생성·수정·삭제 허용. 생성·수정 시 4장의 타입·길이·형식 검사,
   `status`는 두 값만, 날짜는 정규식, `updatedAt == request.time`(서버 시각 강제).
 - 목적: 키를 아는 사람의 편집은 막지 않되, 잘못된 형식·거대 문서·임의 필드로 인한 오염과 남용을 막는다.
